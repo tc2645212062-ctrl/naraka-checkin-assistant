@@ -1,0 +1,267 @@
+import base64
+from pathlib import Path
+import subprocess
+import tempfile
+import threading
+import unittest
+from unittest.mock import patch
+
+from assistant.game_login import classify_page, ensure_game_login
+
+
+class GamePageTests(unittest.TestCase):
+    def test_memory_warning_is_not_the_underlying_start_button(self):
+        state=classify_page('launcher',['游戏运行内存最小为3GB','您的当前可用内存为2.3GB','是否继续启动游戏','继续启动','取消','启动游戏'])
+        self.assertEqual('precondition',state.status)
+        self.assertEqual('',state.action)
+
+    def test_memory_warning_stops_login_without_any_click(self):
+        commands=[]
+        class Broker:
+            def __init__(self,_):pass
+            def __enter__(self):return self
+            def __exit__(self,*_):pass
+            def request(self,command):
+                commands.append(command)
+                return {'kind':'launcher','png':base64.b64encode(b'frame').decode()}
+        with tempfile.TemporaryDirectory() as folder:
+            result=ensure_game_login(Path(folder),client_factory=Broker,read_page=lambda _:['当前可用内存不足','继续启动','启动游戏'])
+        self.assertEqual('precondition',result.status)
+        self.assertEqual(['observe'],commands)
+
+    def test_login_is_not_lobby_and_manual_validation_wins(self):
+        self.assertEqual('saved_account', classify_page('game', ['进入游戏', '使用其他账号登录']).action)
+        self.assertEqual('manual_required', classify_page('game', ['进入游戏', '使用其他账号登录', '验证码']).status)
+        self.assertEqual('network_error', classify_page('game', ['连接服务器失败']).status)
+        self.assertEqual('waiting', classify_page('game', ['英雄']).status)
+        self.assertEqual('ready', classify_page('game', ['开始游戏', '英雄', '大厅']).status)
+        self.assertEqual('ready', classify_page('game', ['开始征神', '英雄兵器', '大厅']).status)
+
+    def test_all_observed_actions_and_no_match_button(self):
+        for kind, lines, action in [
+            ('launcher', ['启动游戏'], 'launcher_start'),
+            ('game', ['公告', 'Space', '继续'], 'announcement'),
+            ('game', ['点击屏幕进入'], 'title_enter'),
+            ('game', ['白泽月卡', '白泽币'], 'dismiss_monthly'),
+        ]:
+            with self.subTest(action=action):
+                self.assertEqual(action, classify_page(kind, lines).action)
+        self.assertFalse(classify_page('game', ['开始游戏', '英雄']).action)
+
+    def test_active_match_stops_without_input(self):
+        result, commands = self.run_flow([['黄玉秘境·三人','当前怪物等级','击败首领，夺取宝物','已强化次数']])
+        self.assertEqual('desktop_busy',result.status)
+        self.assertFalse(any(c.startswith('act:') for c in commands))
+
+    def test_unknown_page_stops_after_bounded_observations(self):
+        result, commands = self.run_flow([['unknown']] * 5)
+        self.assertEqual('unrecognized',result.status)
+        self.assertEqual(5,commands.count('observe'))
+
+    def run_flow(self, pages, cancel=None):
+        commands = []
+        class FakeBroker:
+            def __init__(self, _): pass
+            def __enter__(self): return self
+            def __exit__(self, *_): commands.append('closed')
+            def request(self, command):
+                commands.append(command)
+                return {'kind': 'game', 'png': base64.b64encode(b'fake image').decode()}
+        iterator = iter(pages)
+        with tempfile.TemporaryDirectory() as temp, patch('assistant.game_login.time.sleep'):
+            result = ensure_game_login(Path(temp), cancel=cancel, client_factory=FakeBroker, read_page=lambda _: next(iterator))
+        return result, commands
+
+    def test_success_requires_observed_lobby(self):
+        result, commands = self.run_flow([['公告','Space','继续'], ['进入游戏','使用其他账号登录'], ['点击屏幕进入'], ['开始游戏','英雄','大厅']])
+        self.assertEqual('ready', result.status)
+        self.assertEqual(['act:announcement', 'act:saved_account', 'act:title_enter'], [c for c in commands if c.startswith('act:')])
+        self.assertEqual('closed', commands[-1])
+
+    def test_cold_launch_can_wait_longer_than_four_focus_attempts(self):
+        from assistant.game_login import GameLoginError
+        commands=[]
+        class ColdBroker:
+            def __init__(self,_):self.observations=0
+            def __enter__(self):return self
+            def __exit__(self,*_):pass
+            def request(self,command):
+                commands.append(command)
+                if command.startswith('act:'):return {}
+                self.observations+=1
+                if 2 <= self.observations <= 8:
+                    raise GameLoginError('desktop_busy','游戏窗口未能切到前台，未发送游戏操作')
+                return {'kind':'launcher' if self.observations==1 else 'game','png':base64.b64encode(b'image').decode()}
+        pages=iter([['启动游戏'],['开始游戏','大厅','英雄']])
+        with tempfile.TemporaryDirectory() as folder, patch('assistant.game_login.time.sleep'):
+            result=ensure_game_login(Path(folder),client_factory=ColdBroker,read_page=lambda _:next(pages),close_started_game=False)
+        self.assertEqual('ready',result.status)
+        self.assertEqual(['act:launcher_start'],[c for c in commands if c.startswith('act:')])
+
+    def test_loading_after_title_waits_without_additional_input(self):
+        result, commands = self.run_flow([['点击屏幕进入']] + [['加载画面']] * 8 + [['开始游戏','英雄','大厅']])
+        self.assertEqual('ready', result.status)
+        self.assertEqual(['act:title_enter'], [c for c in commands if c.startswith('act:')])
+
+    def test_unchanged_page_does_not_repeat_input(self):
+        result, commands = self.run_flow([['点击屏幕进入'], ['点击屏幕进入']])
+        self.assertEqual('unrecognized', result.status)
+        self.assertEqual(1, commands.count('act:title_enter'))
+
+    def test_captcha_network_and_cancel_never_click(self):
+        for page, expected in [(['验证码'], 'manual_required'), (['网络异常'], 'network_error')]:
+            result, commands = self.run_flow([page])
+            self.assertEqual(expected, result.status)
+            self.assertFalse(any(c.startswith('act:') for c in commands))
+        cancel=threading.Event(); cancel.set()
+        result, commands=self.run_flow([],cancel)
+        self.assertEqual('interrupted',result.status)
+        self.assertNotIn('observe',commands)
+
+
+class ForegroundTests(unittest.TestCase):
+    def test_alt_released_before_switching_to_high_integrity_window(self):
+        import win32api, win32gui, win32con
+        from unittest.mock import Mock
+        from assistant.game_login import focus_game_window
+        events=[]
+        def foreground(_): events.append('focus')
+        def key(vk, scan, flags, extra): events.append('up' if flags & win32con.KEYEVENTF_KEYUP else 'down')
+        with patch('assistant.desktop.windows.desktop_available',return_value=True), \
+             patch('win32gui.EnumWindows',side_effect=lambda callback, arg: callback(123,arg)), \
+             patch('win32gui.IsWindowVisible',return_value=True), \
+             patch('win32gui.IsIconic',return_value=False), \
+             patch('win32gui.GetWindowRect',return_value=(0,0,1536,930)), \
+             patch('win32process.GetWindowThreadProcessId',return_value=(1,2)), \
+             patch('psutil.Process',return_value=Mock(exe=lambda:r'E:\Naraka\tool\LootHoarder.exe')), \
+             patch('win32gui.GetForegroundWindow',side_effect=[999,999,123]), \
+             patch('win32gui.GetClassName',return_value='OtherWindow'), \
+             patch('win32api.GetAsyncKeyState',return_value=0), \
+             patch('win32gui.ShowWindow'), \
+             patch('win32gui.SetForegroundWindow',side_effect=foreground), \
+             patch('win32api.keybd_event',side_effect=key), \
+             patch('assistant.game_login.time.sleep'):
+            focus_game_window()
+        self.assertEqual(['focus','down','up','focus'],events)
+
+
+ROOT = Path(__file__).resolve().parents[1]
+EXE = ROOT / 'native' / 'dist' / 'GameInputBroker.exe'
+
+
+@unittest.skipUnless(EXE.is_file(), 'Build-GameInput.ps1 required for native template tests')
+class NativeTemplateTests(unittest.TestCase):
+    def test_matching_controls_and_blank_rejection(self):
+        from PIL import Image
+        patches = {
+            'launcher_start': (1538,932,1237,788), 'announcement':(2560,1600,1283,1224),
+            'saved_account':(2560,1600,1225,886), 'title_enter':(2560,1600,1155,1343),
+            'dismiss_monthly':(2560,1600,1860,525),
+            'exit_lobby':(2560,1600,1188,22), 'lobby_nav':(2560,1600,904,23),
+        }
+        with tempfile.TemporaryDirectory() as temp:
+            for action,(w,h,x,y) in patches.items():
+                with self.subTest(action=action):
+                    image=Image.new('RGB',(w,h),(25,25,25))
+                    path=Path(temp)/'frame.png'; image.save(path)
+                    def score():
+                        result=subprocess.run([str(EXE),'--match',action,str(path)],capture_output=True,timeout=10)
+                        self.assertEqual(0,result.returncode)
+                        return float(result.stdout)
+                    self.assertLess(score(),.78)
+                    with Image.open(ROOT/'native'/'templates'/(action+'.png')) as template:
+                        image.paste(template,(x,y))
+                    image.save(path)
+                    self.assertGreater(score(),.99)
+                    image.resize((round(w*1.25),round(h*1.25))).save(path)
+                    self.assertGreater(score(),.78)
+
+    def test_small_window_border_shift_but_not_distant_control(self):
+        from PIL import Image
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp)/'shift.png'
+            template = Image.open(ROOT/'native/templates/launcher_start.png')
+            def score(x, y):
+                image = Image.new('RGB', (1536,930), (25,25,25))
+                image.paste(template, (x,y)); image.save(path)
+                result = subprocess.run([str(EXE),'--match','launcher_start',str(path)],capture_output=True,timeout=10)
+                self.assertEqual(0,result.returncode)
+                return float(result.stdout)
+            self.assertGreater(score(1234,785),.78)
+            self.assertLess(score(1200,750),.78)
+
+
+class BrokerFocusRecoveryTests(unittest.TestCase):
+    def test_observe_keeps_broker_alive_but_actions_still_require_focus(self):
+        from assistant.game_login import BrokerClient, GameLoginError
+        for command,reason,allowed in [('observe','游戏窗口未能切到前台',True),('act:title_enter','游戏窗口未能切到前台',False),('observe','桌面不可交互',False)]:
+            with self.subTest(command=command,reason=reason):
+                b=BrokerClient();b.pipe=1;b.buffer=b'{"ok":true}\n'
+                with patch('assistant.game_login.focus_game_window',side_effect=GameLoginError('desktop_busy',reason)), patch('win32file.WriteFile') as send:
+                    if allowed:
+                        self.assertTrue(b.request(command)['ok']);send.assert_called_once()
+                    else:
+                        with self.assertRaises(GameLoginError):b.request(command)
+                        send.assert_not_called()
+
+
+class MissingWindowLoadingTests(unittest.TestCase):
+    def run_gap(self, gap, initially_missing=False):
+        from assistant.game_login import GameLoginError
+        from unittest.mock import Mock
+        commands=[]
+        class Broker:
+            def __init__(self,_): self.observations=0
+            def __enter__(self):return self
+            def __exit__(self,*_):pass
+            def request(self,command):
+                commands.append(command)
+                if command.startswith('act:'):return {}
+                self.observations+=1
+                if (initially_missing and self.observations==1) or 2 <= self.observations <= gap+1:
+                    raise GameLoginError('entry_unavailable','entry_unavailable: no game window')
+                return {'kind':'launcher' if self.observations==1 else 'game','png':base64.b64encode(b'frame').decode()}
+        pages=iter(([['启动游戏']] if not initially_missing else [])+[['开始游戏','大厅','英雄']])
+        with tempfile.TemporaryDirectory() as folder,patch('assistant.game_login.time.sleep'),patch('subprocess.run',return_value=Mock(returncode=0)) as launch:
+            result=ensure_game_login(Path(folder),client_factory=Broker,read_page=lambda _:next(pages),close_started_game=False)
+        return result,commands,launch.call_count
+
+    def test_missing_window_during_launch_is_waited_for_without_relaunch(self):
+        result,commands,launches=self.run_gap(7)
+        self.assertEqual('ready',result.status)
+        self.assertEqual(1,commands.count('act:launcher_start'))
+        self.assertEqual(0,launches)
+
+    def test_initial_launcher_can_appear_after_more_than_five_seconds(self):
+        result,commands,launches=self.run_gap(7,True)
+        self.assertEqual('ready',result.status)
+        self.assertEqual(1,launches)
+
+    def test_permanently_missing_window_is_bounded_and_retryable(self):
+        result,commands,launches=self.run_gap(99)
+        self.assertEqual('precondition',result.status)
+        self.assertLessEqual(commands.count('observe'),46)
+        self.assertEqual(1,commands.count('act:launcher_start'))
+        self.assertEqual(0,launches)
+
+
+class AutomaticGameExitTests(unittest.TestCase):
+    def test_only_game_started_by_this_run_exits_after_lobby(self):
+        for started,closed,expected in [(True,True,'ready'),(False,True,'ready'),(True,False,'precondition')]:
+            with self.subTest(started=started,closed=closed):
+                commands=[]
+                class Broker:
+                    def __init__(self,_):self.seen=0
+                    def __enter__(self):return self
+                    def __exit__(self,*_):pass
+                    def request(self,command):
+                        commands.append(command)
+                        if command.startswith('act:'):return {}
+                        self.seen+=1
+                        return {'kind':'launcher' if started and self.seen==1 else 'game','png':base64.b64encode(b'frame').decode()}
+                pages=iter(([['启动游戏']] if started else [])+[['开始游戏','大厅','英雄']])
+                with tempfile.TemporaryDirectory() as folder,patch('assistant.game_login.time.sleep'),patch('assistant.game_login.wait_for_game_exit',return_value=closed) as wait:
+                    result=ensure_game_login(Path(folder),client_factory=Broker,read_page=lambda _:next(pages))
+                self.assertEqual(expected,result.status)
+                self.assertEqual(started,'act:exit_lobby' in commands)
+                self.assertEqual(int(started),wait.call_count)

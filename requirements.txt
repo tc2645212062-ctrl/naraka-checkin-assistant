@@ -1,0 +1,9 @@
+mss>=10.0,<11
+numpy>=2.0,<3
+opencv-python>=4.10,<5
+Pillow>=11,<13
+psutil>=7,<8
+pywin32>=310
+pywinauto>=0.6.9,<0.7
+rapidocr-onnxruntime==1.2.3
+PySide6==6.11.2
