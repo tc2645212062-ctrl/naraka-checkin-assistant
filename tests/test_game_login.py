@@ -1,4 +1,5 @@
 import base64
+import json
 from pathlib import Path
 import subprocess
 import tempfile
@@ -10,6 +11,13 @@ from assistant.game_login import classify_page, ensure_game_login
 
 
 class GamePageTests(unittest.TestCase):
+    def test_courier_lobby_uses_prepare_button_without_starting_match(self):
+        state = classify_page('game', ['英雄兵器营地物资聚义厅', '大厅', '无间镖客', '出战准备'])
+        self.assertEqual('ready', state.status)
+        self.assertEqual('', state.action)
+        self.assertEqual('waiting', classify_page('game', ['出战准备', '大厅']).status)
+        self.assertEqual('desktop_busy', classify_page('game', ['暗域正在蔓延', '大厅', '兵器', '出战准备']).status)
+
     def test_memory_warning_is_not_the_underlying_start_button(self):
         state=classify_page('launcher',['游戏运行内存最小为3GB','您的当前可用内存为2.3GB','是否继续启动游戏','继续启动','取消','启动游戏'])
         self.assertEqual('precondition',state.status)
@@ -192,6 +200,16 @@ class NativeTemplateTests(unittest.TestCase):
 
 
 class BrokerFocusRecoveryTests(unittest.TestCase):
+    def test_native_rejection_details_reach_orchestrator(self):
+        from assistant.game_login import BrokerClient, GameLoginError
+        details={'ok':False,'error':'unrecognized: control template mismatch (0.641)',
+                 'code':'control_not_ready','action':'exit_lobby','kind':'game','input_sent':False,'png':'ZnJhbWU='}
+        broker=BrokerClient();broker.pipe=1;broker.buffer=(json.dumps(details)+'\n').encode()
+        with patch('assistant.game_login.focus_game_window'), patch('win32file.WriteFile'):
+            with self.assertRaises(GameLoginError) as caught:broker.request('act:exit_lobby')
+        self.assertEqual('unrecognized',caught.exception.status)
+        self.assertEqual(details,caught.exception.details)
+
     def test_observe_keeps_broker_alive_but_actions_still_require_focus(self):
         from assistant.game_login import BrokerClient, GameLoginError
         for command,reason,allowed in [('observe','游戏窗口未能切到前台',True),('act:title_enter','游戏窗口未能切到前台',False),('observe','桌面不可交互',False)]:
@@ -246,6 +264,62 @@ class MissingWindowLoadingTests(unittest.TestCase):
 
 
 class AutomaticGameExitTests(unittest.TestCase):
+    def test_rejected_exit_reobserves_lobby_and_never_repeats_accepted_close(self):
+        result, commands, images, waits = self.run_rejected_exit(1)
+        self.assertEqual('ready', result.status)
+        self.assertEqual(['act:launcher_start', 'act:exit_lobby', 'act:exit_lobby'], [c for c in commands if c.startswith('act:')])
+        self.assertEqual(['observe', 'act:exit_lobby', 'observe', 'act:exit_lobby'], commands[-4:])
+        self.assertEqual(1, waits)
+        self.assertEqual([b'rejected action frame'], images)
+
+    def test_permanent_exit_rejection_is_bounded_and_does_not_wait_for_exit(self):
+        result, commands, images, waits = self.run_rejected_exit(9)
+        self.assertEqual('unrecognized', result.status)
+        self.assertEqual(3, commands.count('act:exit_lobby'))
+        self.assertEqual(3, len(images))
+        self.assertEqual(0, waits)
+
+    def test_exit_rejection_does_not_retry_if_new_page_requires_verification(self):
+        result, commands, _, waits = self.run_rejected_exit(1, ['安全验证', '验证码'])
+        self.assertEqual('manual_required', result.status)
+        self.assertEqual(1, commands.count('act:exit_lobby'))
+        self.assertEqual(0, waits)
+
+    def test_exit_error_without_proof_no_input_was_sent_is_not_retried(self):
+        result, commands, _, waits = self.run_rejected_exit(1, structured=False)
+        self.assertEqual('unrecognized', result.status)
+        self.assertEqual(1, commands.count('act:exit_lobby'))
+        self.assertEqual(0, waits)
+
+    def run_rejected_exit(self, rejected, next_page=None, structured=True):
+        from assistant.game_login import GameLoginError
+        commands=[]
+        class Broker:
+            def __init__(self,_): self.seen=0; self.rejected=0
+            def __enter__(self): return self
+            def __exit__(self,*_): pass
+            def request(self,command):
+                commands.append(command)
+                if command=='act:exit_lobby':
+                    self.rejected+=1
+                    if self.rejected<=rejected:
+                        if not structured:
+                            raise GameLoginError('unrecognized', 'unrecognized: control template mismatch (0.641)')
+                        raise GameLoginError('unrecognized', 'unrecognized: control template mismatch (0.641)', {
+                            'code':'control_not_ready', 'action':'exit_lobby', 'kind':'game', 'input_sent':False,
+                            'png':base64.b64encode(b'rejected action frame').decode(), 'match':0.641})
+                    return {}
+                if command.startswith('act:'): return {}
+                self.seen+=1
+                return {'kind':'launcher' if self.seen==1 else 'game', 'png':base64.b64encode(b'frame').decode()}
+        pages=iter([['启动游戏'], ['开始游戏','大厅','英雄']] +
+                   [next_page or ['开始游戏','大厅','英雄']]*4)
+        with tempfile.TemporaryDirectory() as folder, patch('assistant.game_login.time.sleep'), \
+                patch('assistant.game_login.wait_for_game_exit',return_value=True) as wait:
+            result=ensure_game_login(Path(folder),client_factory=Broker,read_page=lambda _:next(pages))
+            images=[p.read_bytes() for p in sorted(Path(folder).glob('game-exit-rejected-*.png'))]
+        return result,commands,images,wait.call_count
+
     def test_only_game_started_by_this_run_exits_after_lobby(self):
         for started,closed,expected in [(True,True,'ready'),(False,True,'ready'),(True,False,'precondition')]:
             with self.subTest(started=started,closed=closed):
@@ -267,13 +341,65 @@ class AutomaticGameExitTests(unittest.TestCase):
                 self.assertEqual(int(started),wait.call_count)
 
 class PromotionRecoveryTests(unittest.TestCase):
+    def test_promotion_esc_is_automatic_before_courier_lobby_exit(self):
+        commands=[]
+        class Broker:
+            def __init__(self,_): self.seen=0
+            def __enter__(self): return self
+            def __exit__(self,*_): pass
+            def request(self,command):
+                commands.append(command)
+                if command.startswith('act:'):return {}
+                self.seen+=1
+                return {'kind':'launcher' if self.seen==1 else 'game','png':base64.b64encode(b'frame').decode()}
+        pages=iter([['启动游戏'], ['大厅','兵器','出战准备','今日不再提示','Esc','返回'], ['大厅','兵器','出战准备']])
+        with tempfile.TemporaryDirectory() as folder, patch('assistant.game_login.time.sleep'), patch('assistant.game_login.wait_for_game_exit',return_value=True):
+            result=ensure_game_login(Path(folder),client_factory=Broker,read_page=lambda _:next(pages))
+        self.assertEqual('ready',result.status)
+        self.assertEqual(['act:launcher_start','act:dismiss_promotion','act:exit_lobby'],[c for c in commands if c.startswith('act:')])
+
+    @unittest.skipUnless(EXE.is_file(),'Build-GameInput.ps1 required')
+    def test_both_lobby_layouts_pass_but_partial_controls_and_overlay_do_not(self):
+        from PIL import Image
+        def validate(path):
+            result=subprocess.run([str(EXE),'--check-exit',str(path)],capture_output=True,timeout=15)
+            self.assertEqual(0,result.returncode,result.stderr.decode(errors='replace'))
+            return json.loads(result.stdout)
+        for name in ('lobby-current','courier-lobby'):
+            with self.subTest(name=name):
+                result=validate(ROOT/'tests/fixtures'/f'{name}.png')
+                self.assertTrue(result['allowed'],result)
+                self.assertFalse(result['input_sent'])
+        with tempfile.TemporaryDirectory() as folder:
+            image=Image.new('RGB',(2560,1600),(25,25,25))
+            path=Path(folder)/'frame.png'
+            image.save(path)
+            self.assertFalse(validate(path)['allowed'])
+            image.paste(Image.open(ROOT/'native/templates/exit_lobby.png'),(1188,22))
+            image.save(path)
+            self.assertFalse(validate(path)['allowed'])
+            image.paste(Image.open(ROOT/'native/templates/lobby_identity.png'),(1100,23))
+            image.save(path)
+            self.assertTrue(validate(path)['allowed'])
+            image.paste(Image.open(ROOT/'native/templates/promotion_notice.png'),(2205,1545))
+            image.save(path)
+            self.assertFalse(validate(path)['allowed'])
+
+    def test_real_courier_fixture_is_classified_by_local_ocr(self):
+        from assistant.desktop.vision import read_text
+        state=classify_page('game',[item.text for item in read_text(ROOT/'tests/fixtures/courier-lobby.png')])
+        self.assertEqual('ready',state.status)
+        self.assertEqual('',state.action)
+
     def test_outdated_broker_fails_before_starting_game(self):
         from assistant.game_login import require_broker_version,GameLoginError
         from unittest.mock import Mock
         with patch('subprocess.run',return_value=Mock(returncode=2,stdout=b'')):
             with self.assertRaises(GameLoginError) as caught:require_broker_version()
         self.assertEqual('precondition',caught.exception.status)
-        with patch('subprocess.run',return_value=Mock(returncode=0,stdout=b'2\r\n')):require_broker_version()
+        with patch('subprocess.run',return_value=Mock(returncode=0,stdout=b'2\r\n')):
+            with self.assertRaises(GameLoginError):require_broker_version()
+        with patch('subprocess.run',return_value=Mock(returncode=0,stdout=b'3\r\n')):require_broker_version()
     def test_startup_promotion_is_dismissed_before_underlying_lobby(self):
         lines=['大厅','英雄','开始游戏','今日不再提示','Esc','返回']
         state=classify_page('game',lines)

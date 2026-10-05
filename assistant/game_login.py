@@ -49,14 +49,15 @@ def classify_page(kind: str, lines: list[str]) -> GameState:
         return GameState('advance', '使用游戏保存的账号进入', 'saved_account')
     if '点击屏幕进入' in text:
         return GameState('advance', '进入游戏大厅', 'title_enter')
-    if any(button in text for button in ('开始游戏', '开始征神')) and '大厅' in text and any(label in text for label in ('英雄', '通行证', '武器', '商城', '兵器')):
+    if any(button in text for button in ('开始游戏', '开始征神', '出战准备')) and '大厅' in text and any(label in text for label in ('英雄', '通行证', '武器', '商城', '兵器')):
         return GameState('ready', '已识别游戏大厅；还需在小程序验证并领取积分')
     return GameState('waiting', '等待游戏加载或识别当前页面')
 
 
 class GameLoginError(RuntimeError):
-    def __init__(self, status: str, reason: str):
+    def __init__(self, status: str, reason: str, details: dict | None = None):
         self.status = status
+        self.details = details or {}
         super().__init__(reason)
 
 
@@ -64,7 +65,7 @@ def require_broker_version():
     import subprocess
     checked = subprocess.run([str(BROKER), '--version'], capture_output=True,
                              timeout=5, creationflags=0x08000000)
-    if checked.returncode or checked.stdout.strip() != b'2':
+    if checked.returncode or checked.stdout.strip() != b'3':
         raise GameLoginError('precondition', '游戏操作模块需要更新：请运行 scripts/Install-GameInput.ps1 完成 Windows 管理员授权；本次未启动游戏')
 
 
@@ -238,7 +239,7 @@ class BrokerClient:
             status = reason.split(':', 1)[0]
             if status not in {'desktop_busy', 'unrecognized', 'entry_unavailable', 'timeout'}:
                 status = 'unrecognized'
-            raise GameLoginError('precondition' if status == 'timeout' else status, reason)
+            raise GameLoginError('precondition' if status == 'timeout' else status, reason, result)
         return result
 
     def __exit__(self, *_):
@@ -279,6 +280,7 @@ def ensure_game_login(evidence: Path, event=lambda message: None, cancel=None,
     unknown_frames = 0
     loading_until = 0.0
     launcher_requested = False
+    exit_rejections = 0
     try:
         with client_factory(cancel) as broker:
             for step in range(80):
@@ -334,7 +336,30 @@ def ensure_game_login(evidence: Path, event=lambda message: None, cancel=None,
                 event('游戏登录：' + state.reason)
                 if state.status == 'ready' and close_started_game and (launcher_requested or counts.get('launcher_start')):
                     event('已确认游戏大厅，退出本轮启动的游戏后再领取小程序积分')
-                    broker.request('act:exit_lobby')
+                    try:
+                        broker.request('act:exit_lobby')
+                    except GameLoginError as exc:
+                        details = exc.details
+                        # Only this native response guarantees rejection BEFORE
+                        # any input. Unknown errors must never replay a close.
+                        if not (exc.status == 'unrecognized' and details.get('code') == 'control_not_ready'
+                                and details.get('action') == 'exit_lobby' and details.get('kind') == 'game'
+                                and details.get('input_sent') is False):
+                            raise
+                        exit_rejections += 1
+                        rejected = evidence / f'game-exit-rejected-{exit_rejections}.png'
+                        rejected.write_bytes(base64.b64decode(details['png'], validate=True))
+                        metadata = {k: v for k, v in details.items() if k != 'png'}
+                        rejected.with_suffix('.json').write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding='utf-8')
+                        event(f'大厅退出画面校验未通过（{exit_rejections}/3），本次未发送退出请求：' + str(exc))
+                        if exit_rejections >= 3:
+                            return GameState('unrecognized', '已识别大厅，但退出画面连续三次未通过校验；保留游戏与失败截图，未重复发送关闭请求')
+                        unknown_frames = 0
+                        if cancel and cancel.wait(2):
+                            return GameState('interrupted', '用户停止了游戏登录')
+                        if not cancel:
+                            time.sleep(2)
+                        continue  # Fresh observation/OCR must confirm lobby again.
                     if not wait_for_game_exit(cancel):
                         return GameState('precondition', '已确认登录，但游戏未在限定时间内退出；保留现场，稍后复查')
                     event('已确认游戏进程退出，释放内存并返回微信')

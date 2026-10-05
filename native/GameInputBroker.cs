@@ -142,6 +142,7 @@ class GameInputBroker {
             case "exit_lobby": x=1188;y=22;w=82;h=46;break;
             case "lobby_nav": x=904;y=23;w=260;h=39;break;
             case "lobby_nav_current": x=904;y=23;w=260;h=39;break;
+            case "lobby_identity": x=1100;y=23;w=77;h=39;break;
             case "dismiss_promotion": x=2395;y=1548;w=140;h=42;break;
             case "promotion_notice": x=2205;y=1545;w=180;h=48;break;
             default: throw new Exception("Unsupported action");
@@ -208,11 +209,9 @@ class GameInputBroker {
             string action=command.Substring(4);
             if(action!="launcher_start" && action!="announcement" && action!="saved_account" && action!="title_enter" && action!="dismiss_monthly" && action!="dismiss_promotion" && action!="exit_lobby") throw new Exception("Unsupported action");
             if((action=="launcher_start")!=(kind=="launcher")) throw new Exception("Wrong target process");
-            Rectangle matched; double score=Match(image,action,out matched);
-            if(score<0.78) throw new Exception("unrecognized: control template mismatch ("+score.ToString("F3")+")");
-            if(action=="dismiss_promotion" && Match(image,"promotion_notice")<0.78) throw new Exception("unrecognized: promotion notice missing");
-            if(action=="exit_lobby" && Math.Max(Match(image,"lobby_nav"),Match(image,"lobby_nav_current"))<0.78) throw new Exception("unrecognized: lobby navigation missing");
-            if(action=="exit_lobby" && Match(image,"promotion_notice")>=0.78) throw new Exception("unrecognized: promotion still covers lobby");
+            Rectangle matched; double score;
+            string rejection=RejectionReason(image,action,out matched,out score);
+            if(rejection!=null) return Rejected(image,kind,action,rejection,score);
             Actions++;
             if(action=="exit_lobby") {
                 Guard(); if(GetForegroundWindow()!=w || PathOf(w)!=Game) throw new Exception("desktop_busy: game changed");
@@ -223,6 +222,22 @@ class GameInputBroker {
             else { Click(w,matched.X+matched.Width/2,matched.Y+matched.Height/2,action=="saved_account"); }
             return new {ok=true,action=action,match=score};
         }
+    }
+    static string RejectionReason(Bitmap image,string action,out Rectangle matched,out double score) {
+        score=Match(image,action,out matched);
+        if(score<0.78) return "control template mismatch";
+        if(action=="dismiss_promotion" && Match(image,"promotion_notice")<0.78) return "promotion notice missing";
+        // Menu items to the left change between game modes. The adjacent
+        // guild label stays at the same anchor in the observed lobbies.
+        if(action=="exit_lobby" && Match(image,"lobby_identity")<0.78) return "lobby identity missing";
+        if(action=="exit_lobby" && Match(image,"promotion_notice")>=0.78) return "promotion still covers lobby";
+        return null;
+    }
+    static object Rejected(Bitmap image,string kind,string action,string reason,double score) {
+        return new {ok=false,error="unrecognized: "+reason+" ("+score.ToString("F3")+")",
+            code="control_not_ready",action=action,kind=kind,input_sent=false,match=score,
+            identity_match=action=="exit_lobby"?Match(image,"lobby_identity"):0,
+            width=image.Width,height=image.Height,png=Convert.ToBase64String(Png(image))};
     }
     static string ReadCommand(StreamReader reader) {
         var value=new StringBuilder(); var ch=new char[1]; DateTime until=DateTime.UtcNow.AddSeconds(40);
@@ -238,10 +253,17 @@ class GameInputBroker {
     static int Main(string[] args) { try { return Run(args); } catch(Exception e) { Console.Error.WriteLine(e.Message); return 1; } }
     static int Run(string[] args) {
         if(args.Length>0) {
-            if(args.Length==1 && args[0]=="--version") { Console.WriteLine("2"); return 0; }
+            if(args.Length==1 && args[0]=="--version") { Console.WriteLine("3"); return 0; }
             if(args.Length==1 && args[0]=="--focus-test") { SetProcessDpiAwarenessContext(new IntPtr(-4)); Deadline=DateTime.UtcNow.AddMinutes(1); string kind; Focus(SelectWindow(out kind)); return 0; }
             // Offline template validation, no desktop input, installation or IPC.
             if(args.Length==3 && args[0]=="--match") { using(var b=new Bitmap(args[2])) Console.WriteLine(Match(b,args[1]).ToString("R",System.Globalization.CultureInfo.InvariantCulture)); return 0; }
+            if(args.Length==2 && args[0]=="--check-exit") {
+                using(var b=new Bitmap(args[1])) {
+                    Rectangle matched; double score; string rejection=RejectionReason(b,"exit_lobby",out matched,out score);
+                    Console.WriteLine(Json.Serialize(new {allowed=rejection==null,reason=rejection,match=score,identity_match=Match(b,"lobby_identity"),input_sent=false}));
+                }
+                return 0;
+            }
             return 2;
         }
         if(!new WindowsPrincipal(WindowsIdentity.GetCurrent()).IsInRole(WindowsBuiltInRole.Administrator)) return 3;
