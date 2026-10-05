@@ -244,7 +244,7 @@ class DesktopAdapter:
             raise StopAutomation("desktop_busy", "当前分享窗口不能确认属于永劫无间，未操作")
         self.text_click(snap, "取消")
 
-    def welfare(self):
+    def welfare(self, force_refresh=False):
         mini = self.open_mini()
         self.recover_namecard_dialog()
         entered = False
@@ -269,6 +269,14 @@ class DesktopAdapter:
                 continue
             labels = find_text(snap[2], self.config.welfare_label, exact=True)
             if labels:
+                from .game_tab import selected_game
+                if (not force_refresh and labels[0].center[1] <= snap[0].height*.2
+                        and find_text(snap[2], "已签到")
+                        and selected_game(frame, snap[2]) == self.config.game):
+                    self.assert_game(snap)
+                    if self.config.expected_role and not find_text(snap[2], self.config.expected_role):
+                        raise StopAutomation("manual_required", "页面角色与设置的角色关键词不匹配")
+                    return snap
                 if labels[0].center[1] <= snap[0].height*.2 and not entered:
                     # Reload via the observed home entry, without touching the
                     # other platform's tab or its account/task state.
@@ -278,7 +286,6 @@ class DesktopAdapter:
                     win.click_window_point(snap[0], *hit[1])
                     time.sleep(.7)
                     continue
-                from .game_tab import selected_game
                 if labels[0].center[1] > snap[0].height*.2:
                     # The welfare route loads the platform saved by the home
                     # page. Switching during that load can be overwritten.
@@ -377,7 +384,11 @@ class DesktopAdapter:
         workflow = WorkflowDriver(self)
         actions = {"login": workflow.complete_login_claim, "card": workflow.complete_namecard,
                    "poster": workflow.complete_poster, "read": workflow.complete_reading}
-        for task_id in config.enabled_tasks:
+        # Finish the small WeChat tasks before launching the foreground game.
+        task_order = [k for k in config.enabled_tasks if k != "login"]
+        if "login" in config.enabled_tasks:
+            task_order.append("login")
+        for task_id in task_order:
             self.guard()
             if self.results.get(task_id, (None,))[0] == "already_signed":
                 continue
@@ -411,7 +422,7 @@ class DesktopAdapter:
                     self.event("已识别游戏大厅，等待小程序登录积分状态同步")
                     for refresh in range(7):
                         self.guard()
-                        snap = workflow.wrap(self.welfare())
+                        snap = workflow.wrap(self.welfare(force_refresh=True))
                         button = workflow.task_button(snap, config.task_labels[task_id])
                         if button.text in {"可领取", "已完成"}:
                             break

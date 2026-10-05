@@ -15,7 +15,7 @@ class TaskBundleTests(unittest.TestCase):
         self.adapter = DesktopAdapter(Path(self.temp.name), manual=True)
         self.adapter.guard = lambda: None
         self.adapter.config = Config()
-        self.adapter.welfare = lambda: (None, Path("unused"), [])
+        self.adapter.welfare = lambda **kwargs: (None, Path("unused"), [])
 
     def test_completed_rows_not_executed(self):
         self.adapter.results = {k:("already_signed", "page") for k in Config().enabled_tasks}

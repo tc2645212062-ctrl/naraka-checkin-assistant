@@ -15,7 +15,7 @@ class GameTabTests(unittest.TestCase):
         items=[OcrItem(i['text'],i['confidence'],tuple(map(tuple,i['polygon']))) for i in json.loads(p.with_suffix('.json').read_text(encoding='utf-8'))]
         return p,items
     def test_real_mobile_and_pc_tabs(self):
-        for name,want in [('mobile','手游'),('pc','端游')]:
+        for name,want in [('mobile','手游'),('pc','端游'),('gold-pc','端游')]:
             p,items=self.fixture(name);self.assertEqual(want,selected_game(read_image(p),items))
         self.assertIsNone(selected_game(read_image(p),[]))
     def test_mobile_calendar_cannot_be_clicked_or_marked_pc_success(self):
@@ -62,3 +62,16 @@ class GameTabTests(unittest.TestCase):
             self.assertEqual('手游',selected_game(frame,recovered))
         with patch('assistant.desktop.game_tab.engine',return_value=Mock(return_value=(raw[:1],None))):
             self.assertEqual(original,recognize_tabs(frame,original))
+
+    def test_verified_welfare_page_is_reused_without_back_navigation(self):
+        def item(text,y):
+            return OcrItem(text,.9,((70,y),(120,y),(120,y+20),(70,y+20)))
+        window=WindowInfo(1,2,'永劫无间','Chrome',True,False,(0,0,642,1180))
+        ready=(window,Path('welfare.png'),[item('福利中心',65),item('已签到',350),item('每日登录永劫无间游戏',800)])
+        import numpy as np
+        with tempfile.TemporaryDirectory() as folder,patch('assistant.desktop.automation.read_image',return_value=np.zeros((1180,642,3))),patch('assistant.desktop.automation.match',return_value=None),patch('assistant.desktop.game_tab.selected_game',return_value='端游'),patch('assistant.desktop.automation.win.click_window_point') as click:
+            a=DesktopAdapter(Path(folder));a.config=Config(game='端游')
+            a.open_mini=Mock(return_value=window);a.recover_namecard_dialog=Mock()
+            a.snapshot=Mock(return_value=ready);a.assert_game=Mock()
+            self.assertIs(ready,a.welfare())
+            click.assert_not_called();a.snapshot.assert_called_once()

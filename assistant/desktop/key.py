@@ -74,9 +74,10 @@ def key_valid_now(items, published, current):
     return False
 
 
-def extract_key_from_article_image(image: Path) -> str | None:
+def extract_key_from_article_image(image: Path, items=None) -> str | None:
     """Read the large answer printed right of the '今日金钥匙' banner."""
-    items = read_text(image)
+    if items is None:
+        items = read_text(image)
     anchors = find_text(items, "今日金钥匙", exact=True)
     if len(anchors) != 1:
         return None

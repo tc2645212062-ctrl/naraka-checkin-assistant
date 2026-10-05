@@ -10,7 +10,7 @@ from ..config import now
 from .recognition import match, read_image
 from .task_workflows import Snapshot, TaskWorkflows
 from .models import OcrItem
-from .vision import find_text, combined_text
+from .vision import find_text, combined_text, normalize
 
 TITLES = {"calendar": "日历签到", "login": "登录游戏领取", "card": "名片任务", "poster": "海报任务", "read": "阅读文章", "key": "金钥匙答题"}
 
@@ -150,18 +150,44 @@ class WorkflowDriver(TaskWorkflows):
         if published is None:
             raise win.AutomationSafetyError("文章加载后仍无法识别官方署名和发布日期")
         self.adapter.verified_articles.add(reader.handle)
-        for index in range(48):
+        self.adapter.event("已核验官方文章日期，优先从文章末尾向上寻找金钥匙")
+        win.press_keys(reader, "^{END}")
+        time.sleep(.5)
+        answer = self._scan_key_region(reader, published, title, "key-tail", 4, 14)
+        if answer:
+            return answer
+        self.adapter.event("文章末尾未识别完整金钥匙，回到顶部进行一次全文扫描")
+        win.press_keys(reader, "^{HOME}")
+        time.sleep(.5)
+        answer = self._scan_key_region(reader, published, title, "key-page", -4, 96)
+        if answer:
+            return answer
+        raise win.AutomationSafetyError("最新官方文章扫描结束，未识别可确认的金钥匙；请查看文章证据，未提交")
+
+    def _scan_key_region(self, reader, published, title, prefix, scroll_steps, limit):
+        previous_signature = None
+        unchanged = 0
+        for index in range(limit):
             self.adapter.guard()
-            page = self.snapshot(reader, f"key-page-{index:02d}")
-            answer = extract_key_from_article_image(page.image)
+            page = self.snapshot(reader, f"{prefix}-{index:02d}")
+            answer = extract_key_from_article_image(page.image, page.items)
             if answer:
                 if not key_valid_now(page.items, published, now()):
                     raise KeyUnavailable("最新文章的金钥匙已过期或有效期不明，等待新的有效答案；未提交")
                 self.log("gold_key_source", title=title.text, date=str(self.adapter.day), evidence=str(page.image))
                 return answer
-            win.scroll_window(reader, -8)
+            signature = tuple(normalize(i.text) for i in page.items
+                              if 70 < i.center[1] < page.window.height-80)
+            unchanged = unchanged+1 if signature and signature == previous_signature else 0
+            previous_signature = signature
+            if unchanged >= 2:
+                self.adapter.event("文章滚动后连续两次内容未变化，已结束本段扫描")
+                break
+            # A full-screen wheel jump can skip an entire key banner between
+            # captures. Half the former step preserves overlap on this reader.
+            win.scroll_window(reader, scroll_steps)
             time.sleep(.5)
-        raise KeyUnavailable("最新官方文章中尚未找到可确认的有效金钥匙；未提交")
+        return None
 
     @staticmethod
     def _latest_key_article_item(latest):

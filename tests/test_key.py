@@ -71,3 +71,51 @@ class TexturedBannerTests(unittest.TestCase):
         reader=Mock(side_effect=[([[[], '特权网吧', .58]],None),([[[], '不同答案', .9]],None),([[[], '特权网吧', .9]],None)])
         with patch('assistant.desktop.key.engine',return_value=reader):
             self.assertIsNone(extract_key_from_article_image(image))
+
+class ArticleScanTests(unittest.TestCase):
+    def make_driver(self):
+        from unittest.mock import Mock
+        window=WindowInfo(1,1,'微信','Chrome',True,False,(0,0,1400,1360))
+        adapter=Mock();adapter.day=date(2026,10,3);adapter.verified_articles=set()
+        driver=WorkflowDriver(adapter);driver.open_official_account=Mock(return_value=window)
+        driver._latest_key_article_item=Mock(return_value=item('官方最新文章'))
+        driver.click_item=Mock()
+        def capture(window,name):
+            items=[item('劫宝 永劫无间 2026年10月2日21:00')] if 'top' in name else [item('文章正文',200)]
+            return Snapshot(name,window,Path(name+'.png'),items)
+        driver.snapshot=Mock(side_effect=capture)
+        return driver,window
+
+    def test_key_scroll_overlaps_banner_instead_of_skipping_it(self):
+        from unittest.mock import patch
+        driver,window=self.make_driver()
+        with patch('assistant.desktop.workflows.win.enumerate_wechat_windows',return_value=[window]),patch('assistant.desktop.workflows.win.win32gui.GetForegroundWindow',return_value=1),patch('assistant.desktop.workflows.win.focus_window',return_value=window),patch('assistant.desktop.workflows.win.press_keys'),patch('assistant.desktop.workflows.win.scroll_window') as scroll,patch('assistant.desktop.workflows.time.sleep'),patch('assistant.desktop.workflows.extract_key_from_article_image',side_effect=[None,'测试口令']),patch('assistant.desktop.workflows.key_valid_now',return_value=True):
+            self.assertEqual('测试口令',driver.find_today_key())
+        self.assertEqual(4,scroll.call_args_list[-1].args[1])
+
+    def test_repeated_article_footer_stops_scanning(self):
+        from unittest.mock import patch
+        from assistant.desktop.windows import AutomationSafetyError
+        driver,window=self.make_driver()
+        with patch('assistant.desktop.workflows.win.enumerate_wechat_windows',return_value=[window]),patch('assistant.desktop.workflows.win.win32gui.GetForegroundWindow',return_value=1),patch('assistant.desktop.workflows.win.focus_window',return_value=window),patch('assistant.desktop.workflows.win.press_keys'),patch('assistant.desktop.workflows.win.scroll_window') as scroll,patch('assistant.desktop.workflows.time.sleep'),patch('assistant.desktop.workflows.extract_key_from_article_image',return_value=None):
+            with self.assertRaises(AutomationSafetyError):driver.find_today_key()
+        self.assertLessEqual(scroll.call_count,6)
+
+    def test_tail_key_is_found_without_scanning_article_body(self):
+        from unittest.mock import patch
+        driver,window=self.make_driver()
+        with patch('assistant.desktop.workflows.win.enumerate_wechat_windows',return_value=[window]),patch('assistant.desktop.workflows.win.win32gui.GetForegroundWindow',return_value=1),patch('assistant.desktop.workflows.win.focus_window',return_value=window),patch('assistant.desktop.workflows.win.press_keys') as keys,patch('assistant.desktop.workflows.win.scroll_window'),patch('assistant.desktop.workflows.time.sleep'),patch('assistant.desktop.workflows.extract_key_from_article_image',return_value='测试口令'),patch('assistant.desktop.workflows.key_valid_now',return_value=True):
+            self.assertEqual('测试口令',driver.find_today_key())
+        keys.assert_any_call(window,'^{END}')
+        names=[c.args[1] for c in driver.snapshot.call_args_list]
+        self.assertIn('key-tail-00',names)
+        self.assertFalse(any('key-page-' in n for n in names))
+
+    def test_missing_tail_falls_back_to_article_start_once(self):
+        from unittest.mock import patch
+        driver,window=self.make_driver()
+        with patch('assistant.desktop.workflows.win.enumerate_wechat_windows',return_value=[window]),patch('assistant.desktop.workflows.win.win32gui.GetForegroundWindow',return_value=1),patch('assistant.desktop.workflows.win.focus_window',return_value=window),patch('assistant.desktop.workflows.win.press_keys') as keys,patch('assistant.desktop.workflows.win.scroll_window'),patch('assistant.desktop.workflows.time.sleep'),patch('assistant.desktop.workflows.extract_key_from_article_image',side_effect=[None,None,None,'测试口令']),patch('assistant.desktop.workflows.key_valid_now',return_value=True):
+            self.assertEqual('测试口令',driver.find_today_key())
+        self.assertEqual(2,len([c for c in keys.call_args_list if c.args[1]=='^{HOME}']))
+        names=[c.args[1] for c in driver.snapshot.call_args_list]
+        self.assertIn('key-tail-02',names);self.assertIn('key-page-00',names)

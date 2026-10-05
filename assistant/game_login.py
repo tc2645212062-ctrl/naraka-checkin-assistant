@@ -39,6 +39,8 @@ def classify_page(kind: str, lines: list[str]) -> GameState:
         return GameState('unrecognized', '无法识别目标程序')
     if any(token in text for token in ('当前怪物等级', '暗域正在蔓延', '暗域蔓延倒计时')) or ('击败首领' in text and '已强化次数' in text):
         return GameState('desktop_busy', '检测到正在对局，停止操作并保留游戏')
+    if '今日不再提示' in text and ('Esc' in text or 'ESC' in text) and '返回' in text:
+        return GameState('advance', '关闭已识别的活动宣传弹窗', 'dismiss_promotion')
     if '白泽月卡' in text and ('白泽币' in text or '月卡奖励' in text):
         return GameState('advance', '关闭已识别的月卡弹窗', 'dismiss_monthly')
     if '公告' in text and '继续' in text and ('Space' in text or 'space' in text):
@@ -56,6 +58,14 @@ class GameLoginError(RuntimeError):
     def __init__(self, status: str, reason: str):
         self.status = status
         super().__init__(reason)
+
+
+def require_broker_version():
+    import subprocess
+    checked = subprocess.run([str(BROKER), '--version'], capture_output=True,
+                             timeout=5, creationflags=0x08000000)
+    if checked.returncode or checked.stdout.strip() != b'2':
+        raise GameLoginError('precondition', '游戏操作模块需要更新：请运行 scripts/Install-GameInput.ps1 完成 Windows 管理员授权；本次未启动游戏')
 
 
 def focus_game_window():
@@ -147,6 +157,7 @@ class BrokerClient:
         self.guard()
         if not BROKER.is_file():
             raise GameLoginError('precondition', '尚未安装游戏自动操作模块，请运行 scripts/Install-GameInput.ps1')
+        require_broker_version()
         sid = win32security.ConvertSidToStringSid(win32security.GetTokenInformation(
             win32security.OpenProcessToken(__import__('win32api').GetCurrentProcess(), win32con.TOKEN_QUERY), win32security.TokenUser)[0])
         service = win32com.client.Dispatch('Schedule.Service')
@@ -196,7 +207,7 @@ class BrokerClient:
         import win32file
         import win32pipe
         self.guard()
-        if command not in {'observe', 'act:launcher_start', 'act:announcement', 'act:saved_account', 'act:title_enter', 'act:dismiss_monthly', 'act:exit_lobby'}:
+        if command not in {'observe', 'act:launcher_start', 'act:announcement', 'act:saved_account', 'act:title_enter', 'act:dismiss_monthly', 'act:dismiss_promotion', 'act:exit_lobby'}:
             raise ValueError('Unsupported game operation')
         try:
             focus_game_window()

@@ -265,3 +265,31 @@ class AutomaticGameExitTests(unittest.TestCase):
                 self.assertEqual(expected,result.status)
                 self.assertEqual(started,'act:exit_lobby' in commands)
                 self.assertEqual(int(started),wait.call_count)
+
+class PromotionRecoveryTests(unittest.TestCase):
+    def test_outdated_broker_fails_before_starting_game(self):
+        from assistant.game_login import require_broker_version,GameLoginError
+        from unittest.mock import Mock
+        with patch('subprocess.run',return_value=Mock(returncode=2,stdout=b'')):
+            with self.assertRaises(GameLoginError) as caught:require_broker_version()
+        self.assertEqual('precondition',caught.exception.status)
+        with patch('subprocess.run',return_value=Mock(returncode=0,stdout=b'2\r\n')):require_broker_version()
+    def test_startup_promotion_is_dismissed_before_underlying_lobby(self):
+        lines=['大厅','英雄','开始游戏','今日不再提示','Esc','返回']
+        state=classify_page('game',lines)
+        self.assertEqual('advance',state.status)
+        self.assertEqual('dismiss_promotion',state.action)
+
+    def test_other_escape_labels_do_not_trigger_promotion_action(self):
+        state=classify_page('game',['加载中','Esc','返回'])
+        self.assertEqual('waiting',state.status)
+        state=classify_page('game',['暗域正在蔓延','今日不再提示','Esc','返回'])
+        self.assertEqual('desktop_busy',state.status)
+
+    @unittest.skipUnless(EXE.is_file(),'Build-GameInput.ps1 required')
+    def test_real_changed_lobby_and_promotion_controls(self):
+        for action,name in [('lobby_nav_current','lobby-current'),('exit_lobby','lobby-current'),('dismiss_promotion','promotion-footer'),('promotion_notice','promotion-footer')]:
+            with self.subTest(action=action):
+                result=subprocess.run([str(EXE),'--match',action,str(ROOT/'tests/fixtures'/f'{name}.png')],capture_output=True,timeout=15)
+                self.assertEqual(0,result.returncode)
+                self.assertGreater(float(result.stdout),.78)
