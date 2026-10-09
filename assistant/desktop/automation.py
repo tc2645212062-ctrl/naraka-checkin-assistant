@@ -10,6 +10,7 @@ from ..config import now
 from . import windows as win
 from .recognition import calendar, match, read_image
 from .vision import combined_text, find_text, read_text
+from .mini_list import mini_list_ready, select_mini_entry
 
 
 class StopAutomation(Exception):
@@ -168,7 +169,7 @@ class DesktopAdapter:
                       and (w.minimized or w.area > 200000)]
         for window in candidates:
             page = self.snapshot(window, "mini-list-window", inspect_only=True)
-            if find_text(page[2], "最近使用", exact=True) and find_text(page[2], "我的常用", exact=True):
+            if mini_list_ready(page[2]):
                 if self.window_session:
                     self.window_session.remember(page[0])
                 self.check_page(page[0], page[2])
@@ -187,7 +188,7 @@ class DesktopAdapter:
             return self.wait_mini()
         snap = self.mini_list_snapshot(main)
         def listed(page):
-            return bool(find_text(page[2], "最近使用", exact=True) and find_text(page[2], "我的常用", exact=True))
+            return mini_list_ready(page[2])
         def discovery(page):
             return bool(find_text(page[2], "发现", exact=True) and find_text(page[2], "朋友圈", exact=True)
                         and find_text(page[2], "小程序", exact=True))
@@ -218,16 +219,13 @@ class DesktopAdapter:
                         break
                 else:
                     raise StopAutomation("network_error", "微信小程序列表加载超时，将按连接失败策略重试")
-        recent = find_text(snap[2], "最近使用", exact=True)
-        common = find_text(snap[2], "我的常用", exact=True)
-        if len(recent) != 1:
-            raise StopAutomation("entry_unavailable", "微信最近使用小程序列表未出现")
-        lower = recent[0].center[1]
-        upper = min([i.center[1] for i in common if i.center[1] > lower] or [lower + 450])
-        matches = [i for i in find_text(snap[2], self.config.mini_title, exact=True) if lower < i.center[1] < upper]
-        if len(matches) != 1:
-            raise StopAutomation("entry_unavailable", "最近使用列表中没有唯一的目标小程序；首次请在微信打开一次或配置快捷方式")
-        self.click(snap, matches[0])
+        try:
+            entry = select_mini_entry(snap[2], self.config.mini_title)
+        except ValueError as exc:
+            raise StopAutomation("entry_unavailable", str(exc)) from exc
+        if entry is None:
+            raise StopAutomation("entry_unavailable", "可见的最近使用/我的常用分区中没有唯一目标小程序；首次请在微信打开一次或配置快捷方式")
+        self.click(snap, entry)
         return self.wait_mini()
 
     def recover_namecard_dialog(self):
