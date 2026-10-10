@@ -66,11 +66,14 @@ class TexturedBannerTests(unittest.TestCase):
 
     def test_disagreeing_fallback_readings_do_not_submit(self):
         from assistant.desktop.key import extract_key_from_article_image
+        from assistant.desktop.vision import read_text
         from unittest.mock import Mock,patch
         image=Path(__file__).parent/'fixtures/textured-key-banner.png'
+        # Exercise the crop fallback when the page OCR has only the label.
+        items=[i for i in read_text(image) if i.text=='今日金钥匙']
         reader=Mock(side_effect=[([[[], '特权网吧', .58]],None),([[[], '不同答案', .9]],None),([[[], '特权网吧', .9]],None)])
         with patch('assistant.desktop.key.engine',return_value=reader):
-            self.assertIsNone(extract_key_from_article_image(image))
+            self.assertIsNone(extract_key_from_article_image(image,items))
 
 class ArticleScanTests(unittest.TestCase):
     def make_driver(self):

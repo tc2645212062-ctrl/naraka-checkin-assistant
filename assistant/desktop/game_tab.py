@@ -23,9 +23,11 @@ def selected_game(frame, items):
             return None
         blue, green, red = np.median(patch.reshape(-1,3), axis=0)
         # Selected tab is brown; inactive tabs can be neutral or gold. The
-        # gold home background has a larger green-blue gap. A redesign
-        # or two highlighted tabs is unknown, never assumed to be the PC game.
-        if red-blue > 25 and red-green > 15 and green-blue < 28 and 55 < red < 220:
+        # gold home background has a larger green-blue gap; dark red themes
+        # have much less blue relative to red than the brown highlight.
+        # Two highlighted tabs remain unknown, never assumed to be the PC game.
+        if (red-blue > 25 and red-green > 15 and green-blue < 28
+                and 55 < red < 220 and blue > red*.45):
             selected.append(title)
     return selected[0] if len(selected) == 1 else None
 

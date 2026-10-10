@@ -92,6 +92,32 @@ def extract_key_from_article_image(image: Path, items=None) -> str | None:
     y2 = min(height, bottom + 125)
     if x2 <= x1 or y2 <= y1:
         return None
+
+    def row_answers(page):
+        label_height = max(1, bottom - top)
+        return [item for item in page
+                if re.fullmatch(r"[\u4e00-\u9fff]{2,8}", re.sub(r"\s+", "", item.text))
+                and x1 <= item.bounds[0] < item.bounds[2] <= x2
+                and abs(item.center[1] - anchors[0].center[1]) <= label_height * .65
+                and label_height * .5 <= item.bounds[3] - item.bounds[1] <= label_height * 2]
+
+    # Cropping a textured, large-font banner can split a correctly detected word.
+    # Keep full-frame context and require two agreeing, high-confidence readings
+    # on the unique answer row; body text and competing candidates are rejected.
+    whole = row_answers(items)
+    if len(whole) > 1:
+        return None
+    if len(whole) == 1 and whole[0].confidence >= .75:
+        results, _ = engine()(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY))
+        confirmation = row_answers([
+            OcrItem(str(raw), float(score), tuple(tuple(point) for point in polygon))
+            for polygon, raw, score in results or []])
+        answer = re.sub(r"\s+", "", whole[0].text)
+        if (len(confirmation) == 1 and confirmation[0].confidence >= .75
+                and re.sub(r"\s+", "", confirmation[0].text) == answer):
+            return answer
+        return None
+
     crop = frame[y1:y2, x1:x2]
     def candidate(pixels, minimum):
         results, _ = engine()(pixels)
