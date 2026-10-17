@@ -67,6 +67,13 @@ class Engine:
                     adapter.close()
             finally:
                 self.lock.release()
+                # Optional local repair outbox. Its failure must never change the
+                # business result, and delivery waits until workbench cleanup ends.
+                try:
+                    from .repair_bridge import kick
+                    kick(self.store.path.parent, locals().get('run_id'))
+                except Exception:
+                    pass
 
     def report(self, run_id: int, config: Config, status: str, note: str = ""):
         with self.lock:
