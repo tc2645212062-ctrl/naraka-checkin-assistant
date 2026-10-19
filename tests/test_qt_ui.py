@@ -37,8 +37,8 @@ class QtUiTests(unittest.TestCase):
         self.qt.processEvents()
         self.temp.cleanup()
 
-    def wait_run(self):
-        deadline = time.monotonic()+5
+    def wait_run(self, timeout=5):
+        deadline = time.monotonic()+timeout
         while self.app.busy and time.monotonic() < deadline:
             QTest.qWait(30)
             self.app.tick()
@@ -137,7 +137,9 @@ class QtUiTests(unittest.TestCase):
         with patch.object(self.app,"notify"):
             self.app.tick()
             self.assertTrue(self.app.busy)
-            self.wait_run()
+            # Real dispatch includes a 3s startup grace; allow bounded extra
+            # time for the injected adapter and storage on a loaded CI runner.
+            self.wait_run(timeout=15)
             self.app.tick()
         rows = self.app.store.history()
         self.assertEqual(1,len(rows))
