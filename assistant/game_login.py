@@ -281,6 +281,7 @@ def ensure_game_login(evidence: Path, event=lambda message: None, cancel=None,
     loading_until = 0.0
     launcher_requested = False
     exit_rejections = 0
+    title_rejections = 0
     try:
         with client_factory(cancel) as broker:
             for step in range(80):
@@ -373,7 +374,31 @@ def ensure_game_login(evidence: Path, event=lambda message: None, cancel=None,
                     # No repeated clicks when the first action's result is unclear.
                     if counts.get(state.action, 0):
                         return GameState('unrecognized', '操作后仍停在同一游戏页面，停止重复输入：' + state.action)
-                    broker.request('act:' + state.action)
+                    try:
+                        broker.request('act:' + state.action)
+                    except GameLoginError as exc:
+                        details = exc.details
+                        # The title label animates between observation and the
+                        # broker's fresh capture. Only an explicit pre-input
+                        # rejection permits another attempt after fresh OCR.
+                        if not (state.action == 'title_enter' and exc.status == 'unrecognized'
+                                and details.get('code') == 'control_not_ready'
+                                and details.get('action') == 'title_enter' and details.get('kind') == 'game'
+                                and details.get('input_sent') is False):
+                            raise
+                        title_rejections += 1
+                        rejected = evidence / f'game-title-rejected-{title_rejections}.png'
+                        rejected.write_bytes(base64.b64decode(details['png'], validate=True))
+                        metadata = {k: v for k, v in details.items() if k != 'png'}
+                        rejected.with_suffix('.json').write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding='utf-8')
+                        event(f'标题页控件尚未通过画面校验（{title_rejections}/3），本次未发送点击，等待后重新观察：' + str(exc))
+                        if title_rejections >= 3:
+                            return GameState('unrecognized', '标题页控件连续三次未通过画面校验；保留游戏与失败截图，未发送点击')
+                        if cancel and cancel.wait(2):
+                            return GameState('interrupted', '用户停止了游戏登录')
+                        if not cancel:
+                            time.sleep(2)
+                        continue
                     counts[state.action] = 1
                     if state.action in {'launcher_start', 'title_enter'}:
                         loading_until = min(deadline, time.monotonic() + 90)

@@ -127,6 +127,96 @@ class GamePageTests(unittest.TestCase):
         self.assertNotIn('observe',commands)
 
 
+class TitleControlRecoveryTests(unittest.TestCase):
+    def run_rejected_title(self, rejected=1, pages=None, details_override=None,
+                           structured=True, cancel=None):
+        from assistant.game_login import GameLoginError
+        commands, events = [], []
+        class Broker:
+            def __init__(self, _): self.attempts = 0
+            def __enter__(self): return self
+            def __exit__(self, *_): pass
+            def request(self, command):
+                commands.append(command)
+                if command == 'act:title_enter':
+                    self.attempts += 1
+                    if self.attempts <= rejected:
+                        details = {
+                            'code': 'control_not_ready', 'action': 'title_enter',
+                            'kind': 'game', 'input_sent': False, 'match': .773,
+                            'png': base64.b64encode(b'rejected title frame').decode(),
+                        } if structured else {}
+                        details.update(details_override or {})
+                        raise GameLoginError('unrecognized',
+                            'unrecognized: control template mismatch (0.773)', details)
+                    return {'ok': True}
+                return {'kind': 'game', 'png': base64.b64encode(b'observed frame').decode()}
+        iterator = iter(pages or [['点击屏幕进入']] * (min(rejected, 3) + 1)
+                        + [['开始游戏', '英雄', '大厅']])
+        with tempfile.TemporaryDirectory() as folder, patch('assistant.game_login.time.sleep'):
+            result = ensure_game_login(Path(folder), event=events.append, cancel=cancel,
+                client_factory=Broker, read_page=lambda _: next(iterator))
+            images = [p.read_bytes() for p in sorted(Path(folder).glob('game-title-rejected-*.png'))]
+            metadata = [json.loads(p.read_text(encoding='utf-8'))
+                        for p in sorted(Path(folder).glob('game-title-rejected-*.json'))]
+        return result, commands, images, metadata, events
+
+    def test_proven_rejection_reobserves_before_retry_and_preserves_evidence(self):
+        result, commands, images, metadata, _ = self.run_rejected_title()
+        self.assertEqual('ready', result.status)
+        self.assertEqual(['observe', 'act:title_enter', 'observe', 'act:title_enter', 'observe'], commands)
+        self.assertEqual([b'rejected title frame'], images)
+        self.assertEqual(False, metadata[0]['input_sent'])
+        self.assertEqual(.773, metadata[0]['match'])
+        self.assertNotIn('png', metadata[0])
+
+    def test_permanent_rejection_is_bounded_to_three_attempts(self):
+        result, commands, images, _, _ = self.run_rejected_title(9)
+        self.assertEqual('unrecognized', result.status)
+        self.assertEqual(3, commands.count('act:title_enter'))
+        self.assertEqual(3, commands.count('observe'))
+        self.assertEqual(3, len(images))
+
+    def test_fresh_verification_or_match_page_prevents_another_attempt(self):
+        for page, expected in [(['安全验证', '验证码'], 'manual_required'),
+                               (['暗域正在蔓延'], 'desktop_busy'),
+                               (['网络异常'], 'network_error')]:
+            with self.subTest(page=page):
+                result, commands, _, _, _ = self.run_rejected_title(pages=[['点击屏幕进入'], page])
+                self.assertEqual(expected, result.status)
+                self.assertEqual(1, commands.count('act:title_enter'))
+
+    def test_no_retry_without_exact_native_proof_that_no_input_was_sent(self):
+        for override in ({'code': 'other'}, {'action': 'saved_account'},
+                         {'kind': 'launcher'}, {'input_sent': True}, {'input_sent': 0}):
+            with self.subTest(override=override):
+                result, commands, images, _, _ = self.run_rejected_title(details_override=override)
+                self.assertEqual('unrecognized', result.status)
+                self.assertEqual(['observe', 'act:title_enter'], commands)
+                self.assertEqual([], images)
+        result, commands, _, _, _ = self.run_rejected_title(structured=False)
+        self.assertEqual('unrecognized', result.status)
+        self.assertEqual(['observe', 'act:title_enter'], commands)
+
+    def test_accepted_action_is_never_replayed_even_after_rejected_attempt(self):
+        result, commands, _, _, _ = self.run_rejected_title(pages=[['点击屏幕进入']] * 3)
+        self.assertEqual('unrecognized', result.status)
+        self.assertEqual(2, commands.count('act:title_enter'))  # One rejection, one accepted input.
+
+    def test_loading_after_rejection_is_observed_without_another_click(self):
+        result, commands, _, _, _ = self.run_rejected_title(
+            pages=[['点击屏幕进入'], ['加载中'], ['开始游戏', '大厅', '英雄']])
+        self.assertEqual('ready', result.status)
+        self.assertEqual(1, commands.count('act:title_enter'))
+
+    def test_cancel_during_rejection_wait_stops_before_reobservation(self):
+        from unittest.mock import Mock
+        cancel = Mock(is_set=lambda: False, wait=lambda _: True)
+        result, commands, _, _, _ = self.run_rejected_title(cancel=cancel)
+        self.assertEqual('interrupted', result.status)
+        self.assertEqual(['observe', 'act:title_enter'], commands)
+
+
 class ForegroundTests(unittest.TestCase):
     def test_alt_released_before_switching_to_high_integrity_window(self):
         import win32api, win32gui, win32con
