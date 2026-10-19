@@ -61,6 +61,10 @@ class AutomationSafetyError(RuntimeError):
     """Raised when an action cannot be performed unambiguously."""
 
 
+class ForegroundUnavailable(AutomationSafetyError):
+    """The interactive desktop cannot currently give the target focus."""
+
+
 def enable_dpi_awareness() -> None:
     """Use physical pixels so screenshots and input coordinates agree."""
     try:
@@ -196,11 +200,63 @@ def ensure_wechat_main_window(timeout: float = 40.0) -> tuple[WindowInfo, bool]:
     raise AutomationSafetyError("WeChat launched but its main window did not appear.")
 
 
-def restore_existing_wechat(window: WindowInfo) -> WindowInfo:
-    if not wechat_processes():
-        raise AutomationSafetyError("WeChat is not running; launch is intentionally disabled.")
+def _activation_guard() -> None:
+    if not desktop_available():
+        raise ForegroundUnavailable("桌面不可交互，未切换微信窗口")
+    if any(win32api.GetAsyncKeyState(key) & 0x8000
+           for key in (win32con.VK_MENU, win32con.VK_CONTROL, win32con.VK_SHIFT)):
+        raise ForegroundUnavailable("用户正在按住修饰键，停止切换微信窗口")
+
+
+def _activation_target(window: WindowInfo) -> WindowInfo:
     if not win32gui.IsWindow(window.handle):
         raise AutomationSafetyError("The selected WeChat window is no longer valid.")
+    current = _window_for_handle(window.handle)
+    if (current.pid, current.class_name) != (window.pid, window.class_name):
+        raise AutomationSafetyError("The selected WeChat window identity has changed.")
+    return current
+
+
+def _activate_foreground(window: WindowInfo) -> WindowInfo:
+    def focused():
+        try:
+            handle = win32gui.GetForegroundWindow()
+            return bool(handle) and target_or_owned_popup(handle, window)
+        except win32gui.error:
+            return False
+
+    _activation_guard()
+    current = _activation_target(window)
+    if focused():
+        return current
+    for attempt in range(2):
+        _activation_guard()
+        _activation_target(window)
+        if attempt:
+            # Release our reversible ALT tap before requesting foreground;
+            # never leave a modifier held while the target gains focus.
+            win32api.keybd_event(win32con.VK_MENU, 0, 0, 0)
+            try:
+                time.sleep(.02)
+            finally:
+                win32api.keybd_event(win32con.VK_MENU, 0, win32con.KEYEVENTF_KEYUP, 0)
+        try:
+            win32gui.SetForegroundWindow(window.handle)
+        except win32gui.error:
+            pass  # Win32 may report error 0; actual foreground is decisive.
+        time.sleep(.35)
+        _activation_guard()
+        current = _activation_target(window)
+        if focused():
+            return current
+    raise ForegroundUnavailable("微信窗口未能切到前台，未发送任务操作")
+
+
+def restore_existing_wechat(window: WindowInfo) -> WindowInfo:
+    _activation_guard()
+    if not wechat_processes():
+        raise AutomationSafetyError("WeChat is not running; launch is intentionally disabled.")
+    _activation_target(window)
 
     if not win32gui.IsWindowVisible(window.handle):
         from .tray import activate_wechat_tray
@@ -216,15 +272,7 @@ def restore_existing_wechat(window: WindowInfo) -> WindowInfo:
             raise AutomationSafetyError("微信托盘入口未唤醒原窗口")
     if win32gui.IsIconic(window.handle):
         win32gui.ShowWindow(window.handle, win32con.SW_RESTORE)
-    try:
-        win32gui.SetForegroundWindow(window.handle)
-    except win32gui.error:
-        # Windows sometimes blocks foreground transfer. The ALT release is a
-        # standard, reversible foreground activation workaround.
-        keyboard.send_keys("%")
-        win32gui.SetForegroundWindow(window.handle)
-    time.sleep(0.4)
-    restored = _window_for_handle(window.handle)
+    restored = _activate_foreground(window)
     if not restored.visible or restored.minimized or restored.area < 300_000:
         raise AutomationSafetyError("The existing WeChat window could not be restored safely.")
     return restored
@@ -232,19 +280,13 @@ def restore_existing_wechat(window: WindowInfo) -> WindowInfo:
 
 def focus_window(window: WindowInfo) -> WindowInfo:
     """Bring a known WeChat-owned window to the foreground."""
-    if not win32gui.IsWindow(window.handle):
-        raise AutomationSafetyError("The selected WeChat window is no longer valid.")
+    _activation_guard()
+    _activation_target(window)
     if not win32gui.IsWindowVisible(window.handle) and window.title == "微信" and window.class_name.startswith("Qt"):
         return restore_existing_wechat(window)
     if win32gui.IsIconic(window.handle) or not win32gui.IsWindowVisible(window.handle):
         win32gui.ShowWindow(window.handle, win32con.SW_RESTORE)
-    try:
-        win32gui.SetForegroundWindow(window.handle)
-    except win32gui.error:
-        keyboard.send_keys("%")
-        win32gui.SetForegroundWindow(window.handle)
-    time.sleep(0.35)
-    return _window_for_handle(window.handle)
+    return _activate_foreground(window)
 
 
 def hide_window(window: WindowInfo) -> None:

@@ -50,7 +50,10 @@ class DesktopAdapter:
         self.guard()
         if self.window_session and not inspect_only:
             self.window_session.remember(window)
-        window = win.focus_window(window)
+        try:
+            window = win.focus_window(window)
+        except win.ForegroundUnavailable as exc:
+            raise StopAutomation("desktop_busy", str(exc)) from exc
         win.assert_target_foreground(window)
         self.step += 1
         path = self.evidence / f"{self.step:02d}-{name}.png"
@@ -133,7 +136,10 @@ class DesktopAdapter:
                     raise StopAutomation("manual_required", "微信需要扫码或手机确认登录")
             try:
                 main = win.choose_main_window(win.enumerate_wechat_windows())
-                main = win.restore_existing_wechat(main)
+                try:
+                    main = win.restore_existing_wechat(main)
+                except win.ForegroundUnavailable as exc:
+                    raise StopAutomation("desktop_busy", str(exc)) from exc
                 snap = self.snapshot(main, "wechat-start-page")
                 from .update_prompt import defer_update_button
                 later = defer_update_button(snap[2], main.width, main.height)
