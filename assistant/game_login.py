@@ -110,12 +110,25 @@ def focus_game_window():
                         == r'e:\naraka\program\narakabladepoint.exe')
         except (psutil.Error, win32gui.error):
             return False
-    if has_focus():
+    minimized = win32gui.IsIconic(hwnd)
+    if has_focus() and not minimized:
         return
     if any(win32api.GetAsyncKeyState(key) & 0x8000 for key in (win32con.VK_MENU,win32con.VK_CONTROL,win32con.VK_SHIFT)):
         raise GameLoginError('desktop_busy', '用户正在按住修饰键，停止自动操作')
-    if win32gui.IsIconic(hwnd):
+    if minimized:
         win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
+        for attempt in range(8):
+            if not desktop_available():
+                raise GameLoginError('desktop_busy', '桌面不可交互，停止等待游戏窗口')
+            rect = win32gui.GetWindowRect(hwnd)
+            if not win32gui.IsIconic(hwnd) and rect[2]-rect[0] > 700 and rect[3]-rect[1] > 400:
+                break
+            if attempt < 7:
+                time.sleep(.2)
+        else:
+            raise GameLoginError('precondition', '游戏/启动器窗口未恢复到可截图尺寸；未发送游戏操作')
+        if has_focus():
+            return
     try:
         win32gui.SetForegroundWindow(hwnd)
     except win32gui.error:
@@ -301,8 +314,12 @@ def ensure_game_login(evidence: Path, event=lambda message: None, cancel=None,
                                               and str(focus_error) == 'entry_unavailable: no game window')
                             now_tick = time.monotonic()
                             loading_gap = missing_window and now_tick < loading_until
-                            can_wait = (focus_error.status == 'desktop_busy' and focus_transition) or loading_gap
+                            small_window = (focus_error.status == 'unrecognized'
+                                            and str(focus_error) == 'unrecognized: window dimensions')
+                            can_wait = (focus_error.status == 'desktop_busy' and focus_transition) or loading_gap or small_window
                             if not can_wait or focus_attempt == focus_attempts-1 or now_tick >= deadline:
+                                if small_window:
+                                    raise GameLoginError('precondition', '游戏/启动器窗口未恢复到可截图尺寸；未发送游戏操作') from focus_error
                                 if missing_window and loading_until:
                                     raise GameLoginError('precondition', '已请求启动游戏，但限定等待内未出现游戏窗口；稍后复查，不重复点击启动') from focus_error
                                 raise

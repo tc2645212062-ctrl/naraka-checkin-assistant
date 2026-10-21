@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from .models import WindowInfo, OcrItem
 from .vision import find_text, nearest_to, combined_text
 from .windows import *
-from .key import extract_key_from_article_image
+from .key import extract_key_from_article_image, publication_date
 KEY_SCAN_PAGES = 48
 
 @dataclass
@@ -73,18 +73,41 @@ class TaskWorkflows:
         if button.text == "已完成":
             self.log("reading_task", status="already-complete")
             return welfare
+        before = {window.handle for window in enumerate_wechat_windows()}
         self.click_item(welfare, button)
         time.sleep(2.0)
-        article = self.snapshot(welfare.window, "11-reading-article")
-        if not find_text(article.items, "永劫无间"):
-            raise AutomationSafetyError("The reading task did not open an official Naraka article.")
+        # The route may stay in the mini-program or open a WeChat reader.
+        # Welfare itself contains the brand in its login task: brand text alone
+        # is not evidence of an article. Observe before scrolling or going back.
+        for attempt in range(12):
+            foreground = win32gui.GetForegroundWindow()
+            readers = [window for window in enumerate_wechat_windows()
+                       if window.handle != welfare.window.handle and window.visible
+                       and window.title == "微信" and window.class_name.startswith("Chrome")
+                       and window.width > 700 and window.height > 400
+                       and (window.handle not in before or window.handle == foreground)]
+            if len(readers) > 1:
+                raise AutomationSafetyError("发现多个文章阅读窗口，停止选择")
+            host = readers[0] if readers else welfare.window
+            article = self.snapshot(host, "11-reading-article")
+            if not find_text(article.items, "福利中心", exact=True) and publication_date(article.items) is not None:
+                break
+            if attempt + 1 < 12:
+                time.sleep(.6)
+        else:
+            raise AutomationSafetyError("阅读任务未在限定时间内打开可验证的官方文章；未滚动或返回")
+        if host.handle != welfare.window.handle and host.handle not in before:
+            self.auxiliary_handles.add(host.handle)
         for _ in range(5):
-            scroll_window(welfare.window, -8)
+            scroll_window(host, -8)
             time.sleep(0.5)
-        self.snapshot(welfare.window, "12-reading-scrolled")
-        # The mini-program's in-app article uses the top-left back button.
+        self.snapshot(host, "12-reading-scrolled")
+        if host.handle == welfare.window.handle:
+            focus_window(welfare.window)
+            self.back(welfare.window)
+        elif host.handle not in before:
+            close_window(host)
         focus_window(welfare.window)
-        self.back(welfare.window)
         time.sleep(2.0)
         result = self._return_to_welfare_after_reading(welfare.window)
         if self.task_button(result, "每日阅读文章").text != "已完成":
