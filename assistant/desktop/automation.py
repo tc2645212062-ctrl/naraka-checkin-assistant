@@ -117,23 +117,46 @@ class DesktopAdapter:
                 raise StopAutomation("entry_unavailable", "未找到微信；请在设置中选择 Weixin.exe")
             subprocess.Popen([self.config.wechat_exe], cwd=str(Path(self.config.wechat_exe).parent))
         login_clicked = False
+        login_loading_logged = False
         update_deferred = False
         for _ in range(30):
             self.guard()
-            logins = [w for w in Desktop(backend="uia").windows() if "LoginWindow" in w.class_name() and w.window_text() == "微信"]
+            candidates = [w for w in Desktop(backend="uia").windows()
+                          if "LoginWindow" in w.class_name() and w.window_text() == "微信"]
+            owned = {w.handle: w for w in win.enumerate_wechat_windows() if w.visible}
+            logins = [w for w in candidates if w.handle in owned]
+            if len(logins) > 1:
+                raise StopAutomation("unrecognized", "发现多个微信登录窗口，停止选择")
             if logins:
+                # Empty UIA children can mean the login page is still loading.
+                # Require an explicit challenge before requesting manual login.
+                labels = ["".join(c.window_text().split())
+                          for c in logins[0].descendants(control_type="Text")]
+                challenge = next((token for token in (
+                    "扫码登录", "扫描二维码", "手机上确认", "手机微信上确认",
+                    "手机确认登录", "手机微信确认", "验证码", "安全验证",
+                    "人机验证", "滑块验证",
+                ) if any(token in label for label in labels)), None)
+                if challenge:
+                    raise StopAutomation("manual_required", f"微信登录页面要求：{challenge}，已停止自动操作")
                 buttons = [c for c in logins[0].descendants(control_type="Button") if c.window_text() == "进入微信"]
+                if len(buttons) > 1:
+                    raise StopAutomation("unrecognized", "未唯一识别微信已保存账号的进入按钮")
                 if buttons and not login_clicked:
-                    login_window = next((w for w in win.enumerate_wechat_windows() if w.handle == logins[0].handle), None)
-                    if login_window is None:
-                        raise StopAutomation("manual_required", "登录窗口已经变化，停止输入")
-                    login_window = win.focus_window(login_window)
+                    login_window = owned[logins[0].handle]
+                    try:
+                        login_window = win.focus_window(login_window)
+                    except win.ForegroundUnavailable as exc:
+                        raise StopAutomation("desktop_busy", str(exc)) from exc
                     rect = buttons[0].rectangle()
                     win.click_window_point(login_window, (rect.left+rect.right)//2-login_window.rect[0], (rect.top+rect.bottom)//2-login_window.rect[1])
                     login_clicked = True
                     self.event("使用微信已保存的登录：进入微信")
-                elif not buttons and not login_clicked:
-                    raise StopAutomation("manual_required", "微信需要扫码或手机确认登录")
+                elif not login_loading_logged:
+                    self.event("微信登录页尚未就绪，等待控件或主窗口加载；未确认需要人工验证")
+                    login_loading_logged = True
+                time.sleep(.5)
+                continue
             try:
                 main = win.choose_main_window(win.enumerate_wechat_windows())
                 try:
@@ -153,7 +176,7 @@ class DesktopAdapter:
                 return main
             except win.AutomationSafetyError:
                 time.sleep(.5)
-        raise StopAutomation("manual_required", "微信登录尚未完成，可能需要手机确认")
+        raise StopAutomation("precondition", "微信登录或主窗口加载超时，未确认需要扫码或手机验证；请稍后复查")
 
     def recover_wechat(self, main):
         from .recovery import restart_main
