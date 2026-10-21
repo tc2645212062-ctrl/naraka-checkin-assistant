@@ -15,7 +15,25 @@ class Snapshot:
     image: Path
     items: list[OcrItem]
 
+class PosterPageNotReady(AutomationSafetyError):
+    """The poster route is unknown; do not attempt subsequent task routes."""
+
 class TaskWorkflows:
+    def _wait_poster_page(self, mini, name, ready, reason, attempts=12):
+        for attempt in range(attempts):
+            page = self.snapshot(mini, name)
+            if ready(page):
+                return page
+            if attempt + 1 < attempts:
+                time.sleep(.6)
+        raise PosterPageNotReady(f"{reason}等待超时；未重复生成或发送海报")
+
+    @staticmethod
+    def _poster_gallery_ready(page):
+        header = [item for item in find_text(page.items, "藏品馆", exact=True)
+                  if item.center[1] < page.window.height * .15]
+        return len(header) == 1 and bool(find_text(page.items, "分享藏品馆"))
+
     def task_button(self, snapshot: Snapshot, task_text: str) -> OcrItem:
         tasks = find_text(snapshot.items, task_text)
         buttons = [
@@ -81,21 +99,19 @@ class TaskWorkflows:
             return welfare
         self.click_item(welfare, button)
         time.sleep(1.5)
-        gallery = self.snapshot(welfare.window, "14-gallery")
-        if not find_text(gallery.items, "藏品馆") or not find_text(gallery.items, "分享藏品馆"):
-            raise AutomationSafetyError("The poster task did not open the expected collection gallery.")
+        gallery = self._wait_poster_page(welfare.window, "14-gallery", self._poster_gallery_ready, "进入藏品馆")
         self.click_text(gallery, "分享藏品馆")
         time.sleep(1.0)
-        preview = self.snapshot(welfare.window, "15-poster-generated")
-        if not find_text(preview.items, "图片预览") or not find_text(preview.items, "转发给朋友"):
-            raise AutomationSafetyError("Poster preview was not recognized; no sharing action will be attempted.")
+        # Generation can still be in progress after text and controls render.
+        # Observe only; never click generation again or select a recipient.
+        self._wait_poster_page(welfare.window, "15-poster-generated",
+                               lambda page: find_text(page.items, "图片预览", exact=True)
+                               and find_text(page.items, "转发给朋友"), "海报生成", attempts=20)
         # Back twice: preview -> gallery -> Welfare Center. Never click forward/send.
         focus_window(welfare.window)
         self.back(welfare.window)
         time.sleep(0.7)
-        gallery_again = self.snapshot(welfare.window, "16-gallery-return")
-        if not find_text(gallery_again.items, "藏品馆"):
-            raise AutomationSafetyError("Poster preview did not return to the gallery.")
+        self._wait_poster_page(welfare.window, "16-gallery-return", self._poster_gallery_ready, "返回藏品馆")
         self.back(welfare.window)
         time.sleep(1.0)
         result = self.wait_for_welfare(welfare.window, "17-welfare-after-poster")

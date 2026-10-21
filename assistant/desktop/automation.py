@@ -425,6 +425,7 @@ class DesktopAdapter:
 
     def sign(self, config):
         from .workflows import WorkflowDriver, TITLES, KeyUnavailable
+        from .task_workflows import PosterPageNotReady
         workflow = WorkflowDriver(self)
         actions = {"login": workflow.complete_login_claim, "card": workflow.complete_namecard,
                    "poster": workflow.complete_poster, "read": workflow.complete_reading}
@@ -496,6 +497,9 @@ class DesktopAdapter:
                 if workflow.task_button(final, config.task_labels[task_id]).text != "已完成":
                     raise win.AutomationSafetyError("动作结束后任务未标记已完成")
                 self.record_task(task_id, "success", "操作后已复查页面：已完成")
+            except PosterPageNotReady as exc:
+                self.record_task(task_id, "entry_unavailable", str(exc))
+                return Result("partial", f"{TITLES[task_id]}：{exc}。后续任务未执行，避免在未知页面操作。", "desktop")
             except StopAutomation as exc:
                 self.keep_windows = exc.status == "manual_required"
                 self.record_task(task_id, exc.status, str(exc))
