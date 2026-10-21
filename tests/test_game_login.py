@@ -489,7 +489,9 @@ class PromotionRecoveryTests(unittest.TestCase):
         self.assertEqual('precondition',caught.exception.status)
         with patch('subprocess.run',return_value=Mock(returncode=0,stdout=b'2\r\n')):
             with self.assertRaises(GameLoginError):require_broker_version()
-        with patch('subprocess.run',return_value=Mock(returncode=0,stdout=b'3\r\n')):require_broker_version()
+        with patch('subprocess.run',return_value=Mock(returncode=0,stdout=b'3\r\n')):
+            with self.assertRaises(GameLoginError):require_broker_version()
+        with patch('subprocess.run',return_value=Mock(returncode=0,stdout=b'4\r\n')):require_broker_version()
     def test_startup_promotion_is_dismissed_before_underlying_lobby(self):
         lines=['大厅','英雄','开始游戏','今日不再提示','Esc','返回']
         state=classify_page('game',lines)

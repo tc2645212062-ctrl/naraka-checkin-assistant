@@ -65,7 +65,7 @@ def require_broker_version():
     import subprocess
     checked = subprocess.run([str(BROKER), '--version'], capture_output=True,
                              timeout=5, creationflags=0x08000000)
-    if checked.returncode or checked.stdout.strip() != b'3':
+    if checked.returncode or checked.stdout.strip() != b'4':
         raise GameLoginError('precondition', '游戏操作模块需要更新：请运行 scripts/Install-GameInput.ps1 完成 Windows 管理员授权；本次未启动游戏')
 
 

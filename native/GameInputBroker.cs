@@ -135,6 +135,7 @@ class GameInputBroker {
         int x,y,w,h,bw=2560,bh=1600;
         switch(action) {
             case "launcher_start": x=1237;y=788;w=137;h=52;bw=1538;bh=932;break;
+            case "launcher_start_current": x=1279;y=788;w=137;h=52;bw=1538;bh=932;break;
             case "announcement": x=1283;y=1224;w=88;h=45;break;
             case "saved_account": x=1225;y=886;w=112;h=39;break;
             case "title_enter": x=1155;y=1343;w=251;h=40;break;
@@ -153,10 +154,19 @@ class GameInputBroker {
         Rectangle matched; return Match(frame,action,out matched);
     }
     static double Match(Bitmap frame,string action,out Rectangle matched) {
+        double best=MatchSingle(frame,action,out matched);
+        if(action=="launcher_start") {
+            Rectangle current; double alternative=MatchSingle(frame,"launcher_start_current",out current);
+            if(alternative>best) { best=alternative;matched=current; }
+        }
+        return best;
+    }
+    static double MatchSingle(Bitmap frame,string action,out Rectangle matched) {
         // A restored border can translate a control by a few physical pixels.
         // Search only the neighbourhood of its fixed, scaled anchor.
         Rectangle anchor=Patch(action,frame.Width,frame.Height); matched=anchor;
-        int radius=Math.Max(2,(int)Math.Ceiling(4.0*frame.Width/(action=="launcher_start"?1538:2560)));
+        bool launcher=action=="launcher_start" || action=="launcher_start_current";
+        int radius=Math.Max(2,(int)Math.Ceiling(4.0*frame.Width/(launcher?1538:2560)));
         double best=-1;
         using(var stream=Assembly.GetExecutingAssembly().GetManifestResourceStream(action+".png"))
         using(var template=new Bitmap(stream))
@@ -253,10 +263,18 @@ class GameInputBroker {
     static int Main(string[] args) { try { return Run(args); } catch(Exception e) { Console.Error.WriteLine(e.Message); return 1; } }
     static int Run(string[] args) {
         if(args.Length>0) {
-            if(args.Length==1 && args[0]=="--version") { Console.WriteLine("3"); return 0; }
+            if(args.Length==1 && args[0]=="--version") { Console.WriteLine("4"); return 0; }
             if(args.Length==1 && args[0]=="--focus-test") { SetProcessDpiAwarenessContext(new IntPtr(-4)); Deadline=DateTime.UtcNow.AddMinutes(1); string kind; Focus(SelectWindow(out kind)); return 0; }
             // Offline template validation, no desktop input, installation or IPC.
             if(args.Length==3 && args[0]=="--match") { using(var b=new Bitmap(args[2])) Console.WriteLine(Match(b,args[1]).ToString("R",System.Globalization.CultureInfo.InvariantCulture)); return 0; }
+            if(args.Length==2 && args[0]=="--check-launcher") {
+                using(var b=new Bitmap(args[1])) {
+                    Rectangle matched; double score; string rejection=RejectionReason(b,"launcher_start",out matched,out score);
+                    Console.WriteLine(Json.Serialize(new {allowed=rejection==null,reason=rejection,match=score,
+                        point_x=matched.X+matched.Width/2,point_y=matched.Y+matched.Height/2,input_sent=false}));
+                }
+                return 0;
+            }
             if(args.Length==2 && args[0]=="--check-exit") {
                 using(var b=new Bitmap(args[1])) {
                     Rectangle matched; double score; string rejection=RejectionReason(b,"exit_lobby",out matched,out score);
