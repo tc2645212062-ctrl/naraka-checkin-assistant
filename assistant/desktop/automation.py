@@ -276,9 +276,19 @@ class DesktopAdapter:
         self.recover_namecard_dialog()
         entered = False
         game_clicked = False
+        restart_deferred = False
         for attempt in range(15):
             snap = self.snapshot(mini, "load-home")
             text = combined_text(snap[2])
+            from .update_prompt import defer_mini_restart_button
+            cancel_restart = defer_mini_restart_button(snap[2], snap[0].width, snap[0].height)
+            if cancel_restart:
+                if restart_deferred:
+                    raise StopAutomation("precondition", "小程序新版本提示未关闭，已停止重复取消")
+                self.text_click(snap, "取消")
+                self.event("已取消本次小程序重启提示，继续使用当前页面")
+                restart_deferred = True
+                continue
             if find_text(snap[2], "游戏名片已分享") and find_text(snap[2], "确认", exact=True):
                 self.text_click(snap, "确认")
                 continue
