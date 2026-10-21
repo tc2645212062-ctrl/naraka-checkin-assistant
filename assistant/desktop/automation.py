@@ -59,7 +59,7 @@ class DesktopAdapter:
         path = self.evidence / f"{self.step:02d}-{name}.png"
         win.capture_window(window, path)
         items = read_text(path, minimum_confidence=.45)
-        if name in {"load-home", "welfare-open", "welfare-ready", "before-sign", "after-sign"}:
+        if name in {"load-home", "welfare-open", "welfare-ready", "calendar-ready", "before-sign", "after-sign"}:
             from .game_tab import recognize_tabs
             items = recognize_tabs(read_image(path), items)
         path.with_suffix(".json").write_text(json.dumps([i.as_dict() for i in items], ensure_ascii=False), encoding="utf-8")
@@ -348,6 +348,22 @@ class DesktopAdapter:
         if self.config.game == "端游" and find_text(snap[2], "登录永劫无间手游"):
             raise StopAutomation("unrecognized", "任务内容属于手游，与端游配置不符；已阻止操作")
 
+    def wait_calendar(self, snap):
+        # Text may appear before the calendar's image resources. Re-observe
+        # without submitting anything; retain the same strict icon evidence.
+        for attempt in range(12):
+            self.guard()
+            self.assert_game(snap)
+            try:
+                return snap, calendar(read_image(snap[1]), snap[2], self.day)
+            except ValueError as exc:
+                if attempt == 11:
+                    raise StopAutomation("unrecognized", f"等待日历资源后仍无法确认：{exc}；未执行签到") from exc
+                if attempt == 0:
+                    self.event("日历文字已出现，但日期或图标尚未明确；限时等待页面资源，不执行签到")
+            time.sleep(.6)
+            snap = self.snapshot(snap[0], "calendar-ready")
+
     def check(self, config):
         self.config = config
         self.event(f"证据目录：{self.evidence}")
@@ -363,6 +379,8 @@ class DesktopAdapter:
             from .session import WindowSession
             self.window_session = WindowSession(self.event)
             snap = self.welfare()
+            if "calendar" in config.enabled_tasks:
+                snap, self.before = self.wait_calendar(snap)
             self.window = snap[0]
             self.welfare_snapshot = snap
             from .workflows import WorkflowDriver, TITLES
@@ -370,7 +388,6 @@ class DesktopAdapter:
             pending = False
             for task_id in config.enabled_tasks:
                 if task_id == "calendar":
-                    self.before = calendar(read_image(snap[1]), snap[2], self.day)
                     done = self.before.status == "already_signed"
                     reason = self.before.detail
                 else:
@@ -495,8 +512,7 @@ class DesktopAdapter:
         try:
             # A fresh capture closes the check/action gap; no blind retry after clicking.
             snap = self.snapshot(self.window, "before-sign")
-            self.assert_game(snap)
-            before = calendar(read_image(snap[1]), snap[2], self.day)
+            snap, before = self.wait_calendar(snap)
             if before.status == "already_signed":
                 return Result("already_signed", "操作前再次检查发现今日已签到，未点击。", "desktop", True)
             self.guard()
