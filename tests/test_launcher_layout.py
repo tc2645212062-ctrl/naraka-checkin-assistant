@@ -78,4 +78,4 @@ class LauncherLayoutTests(unittest.TestCase):
     def test_new_broker_version_requires_the_updated_installed_binary(self):
         result = subprocess.run([str(EXE), '--version'], capture_output=True, timeout=5)
         self.assertEqual(0, result.returncode)
-        self.assertEqual(b'4', result.stdout.strip())
+        self.assertEqual(b'5', result.stdout.strip())

@@ -21,6 +21,7 @@ class GameInputBroker {
     static HashSet<string> Verified = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
     static DateTime Deadline;
     static int Actions;
+    static GameProcessLifetime Lifetime;
     [StructLayout(LayoutKind.Sequential)] struct Rect { public int L,T,R,B; }
     [StructLayout(LayoutKind.Sequential)] struct MouseInput { public int X,Y; public uint Data,Flags,Time; public UIntPtr Extra; }
     [StructLayout(LayoutKind.Sequential)] struct KeyboardInput { public ushort Key,Scan; public uint Flags,Time; public UIntPtr Extra; }
@@ -137,7 +138,8 @@ class GameInputBroker {
             case "launcher_start": x=1237;y=788;w=137;h=52;bw=1538;bh=932;break;
             case "launcher_start_current": x=1279;y=788;w=137;h=52;bw=1538;bh=932;break;
             case "announcement": x=1283;y=1224;w=88;h=45;break;
-            case "saved_account": x=1225;y=886;w=112;h=39;break;
+            case "saved_account":
+            case "saved_account_current": x=1225;y=886;w=112;h=39;break;
             case "title_enter": x=1155;y=1343;w=251;h=40;break;
             case "dismiss_monthly": x=1860;y=525;w=205;h=63;break;
             case "exit_lobby": x=1188;y=22;w=82;h=46;break;
@@ -158,6 +160,10 @@ class GameInputBroker {
         if(action=="launcher_start") {
             Rectangle current; double alternative=MatchSingle(frame,"launcher_start_current",out current);
             if(alternative>best) { best=alternative;matched=current; }
+        }
+        if(action=="saved_account") {
+            Rectangle current; double alternative=MatchSingle(frame,"saved_account_current",out current);
+            if(alternative>best) {best=alternative;matched=current;}
         }
         return best;
     }
@@ -212,6 +218,7 @@ class GameInputBroker {
         try { Thread.Sleep(90); } finally { SendInput(1,new[]{up},Marshal.SizeOf(typeof(Input))); }
     }
     static object Handle(string command) {
+        if(Lifetime!=null) Lifetime.Observe();
         string kind; IntPtr w=SelectWindow(out kind);
         using(var image=Capture(w)) {
             if(command=="observe") return new {ok=true,kind=kind,width=image.Width,height=image.Height,png=Convert.ToBase64String(Png(image))};
@@ -222,6 +229,10 @@ class GameInputBroker {
             Rectangle matched; double score;
             string rejection=RejectionReason(image,action,out matched,out score);
             if(rejection!=null) return Rejected(image,kind,action,rejection,score);
+            if(action=="launcher_start") {
+                uint pid;GetWindowThreadProcessId(w,out pid);
+                Lifetime.PrepareLaunch((int)pid,DateTime.UtcNow.Ticks);
+            }
             Actions++;
             if(action=="exit_lobby") {
                 Guard(); if(GetForegroundWindow()!=w || PathOf(w)!=Game) throw new Exception("desktop_busy: game changed");
@@ -230,6 +241,7 @@ class GameInputBroker {
             else if(action=="announcement") Key(w,0x39);
             else if(action=="dismiss_monthly" || action=="dismiss_promotion") Key(w,0x01);
             else { Click(w,matched.X+matched.Width/2,matched.Y+matched.Height/2,action=="saved_account"); }
+            if(action=="launcher_start") Lifetime.Launched();
             return new {ok=true,action=action,match=score};
         }
     }
@@ -251,6 +263,7 @@ class GameInputBroker {
     }
     static string ReadCommand(StreamReader reader) {
         var value=new StringBuilder(); var ch=new char[1]; DateTime until=DateTime.UtcNow.AddSeconds(40);
+        if(until>Deadline) until=Deadline;
         while(value.Length<=40 && DateTime.UtcNow<Deadline && DateTime.UtcNow<until) {
             var next=reader.ReadAsync(ch,0,1);
             TimeSpan wait=until-DateTime.UtcNow;
@@ -263,7 +276,14 @@ class GameInputBroker {
     static int Main(string[] args) { try { return Run(args); } catch(Exception e) { Console.Error.WriteLine(e.Message); return 1; } }
     static int Run(string[] args) {
         if(args.Length>0) {
-            if(args.Length==1 && args[0]=="--version") { Console.WriteLine("4"); return 0; }
+            if(args.Length==1 && args[0]=="--version") { Console.WriteLine("5"); return 0; }
+            if(args.Length==2 && args[0]=="--check-owner") {
+                var probe=Json.Deserialize<GameOwnershipProbe>(File.ReadAllText(args[1]));
+                var baseline=new Dictionary<int,long>();
+                foreach(var row in probe.baseline) baseline.Add(Int32.Parse(row.Key),row.Value);
+                bool allowed=GameProcessLifetime.CanClaim(probe.game,probe.launcher,probe.requested,baseline,probe.ancestors);
+                Console.WriteLine(Json.Serialize(new {owned=allowed,input_sent=false}));return 0;
+            }
             if(args.Length==1 && args[0]=="--focus-test") { SetProcessDpiAwarenessContext(new IntPtr(-4)); Deadline=DateTime.UtcNow.AddMinutes(1); string kind; Focus(SelectWindow(out kind)); return 0; }
             // Offline template validation, no desktop input, installation or IPC.
             if(args.Length==3 && args[0]=="--match") { using(var b=new Bitmap(args[2])) Console.WriteLine(Match(b,args[1]).ToString("R",System.Globalization.CultureInfo.InvariantCulture)); return 0; }
@@ -291,10 +311,12 @@ class GameInputBroker {
         using(var mutex=new Mutex(true,"Local\\NarakaGameInputBroker-"+sid,out created)) {
             if(!created) return 4;
             Deadline=DateTime.UtcNow.AddMinutes(8);
+            Lifetime=new GameProcessLifetime();
             var security=new PipeSecurity();
             security.SetAccessRuleProtection(true,false);
             security.AddAccessRule(new PipeAccessRule(new SecurityIdentifier(sid),PipeAccessRights.FullControl,AccessControlType.Allow));
             security.AddAccessRule(new PipeAccessRule(new SecurityIdentifier(WellKnownSidType.LocalSystemSid,null),PipeAccessRights.FullControl,AccessControlType.Allow));
+            try {
             using(var pipe=new NamedPipeServerStream("NarakaGameInput-"+sid,PipeDirection.InOut,1,PipeTransmissionMode.Byte,PipeOptions.Asynchronous,4096,4096,security)) {
                 var connect=pipe.BeginWaitForConnection(null,null);
                 if(!connect.AsyncWaitHandle.WaitOne(TimeSpan.FromSeconds(45))) return 5;
@@ -303,7 +325,11 @@ class GameInputBroker {
                 using(var writer=new StreamWriter(pipe,new UTF8Encoding(false)) {AutoFlush=true}) {
                     while(DateTime.UtcNow<Deadline) {
                         string command=ReadCommand(reader);
-                        if(command==null || command=="stop") break;
+                        if(command==null) break;
+                        if(command=="stop" || command=="stop:keep") {
+                            writer.WriteLine(Json.Serialize(Lifetime.Finish(command=="stop:keep")));
+                            break;
+                        }
                         if(command.Length>40) break;
                         object result;
                         try { result=Handle(command); } catch(Exception e) { result=new {ok=false,error=e.Message}; }
@@ -311,6 +337,7 @@ class GameInputBroker {
                     }
                 }
             }
+            } finally { Lifetime.Finish(false); }
         }
         return 0;
     }

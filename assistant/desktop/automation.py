@@ -241,12 +241,26 @@ class DesktopAdapter:
                     raise StopAutomation("entry_unavailable", "点击发现后页面未就绪，未继续点击")
             if not listed(snap):
                 self.text_click(snap, "小程序")
-                for _ in range(15):
-                    time.sleep(.7)
-                    snap = self.mini_list_snapshot(main)
+                for navigation in range(2):
+                    for _ in range(15):
+                        time.sleep(.7)
+                        snap = self.mini_list_snapshot(main)
+                        if listed(snap):
+                            break
                     if listed(snap):
                         break
-                else:
+                    # The observed failure stayed on the same discovery menu.
+                    # Re-select this navigation once, never on an unknown page
+                    # and never repeat a transactional task action.
+                    if navigation == 0 and discovery(snap):
+                        self.event("仍在已验证的发现页，重新打开小程序列表一次")
+                        self.text_click(snap, "小程序")
+                    else:
+                        break
+                if not listed(snap):
+                    if recover and discovery(snap):
+                        self.recover_wechat(main)
+                        return self.open_mini(recover=False)
                     raise StopAutomation("network_error", "微信小程序列表加载超时，将按连接失败策略重试")
         try:
             entry = select_mini_entry(snap[2], self.config.mini_title)
@@ -270,6 +284,47 @@ class DesktopAdapter:
         if not find_text(snap[2], self.config.mini_title, exact=True) or not find_text(snap[2], "发送给", exact=True):
             raise StopAutomation("desktop_busy", "当前分享窗口不能确认属于永劫无间，未操作")
         self.text_click(snap, "取消")
+
+    @staticmethod
+    def known_task_route(snap):
+        window, _, items = snap
+        def header(label):
+            return len([item for item in find_text(items, label, exact=True)
+                        if item.center[1] < window.height * .15]) == 1
+        if header("图片预览") and find_text(items, "转发给朋友", exact=True):
+            return "海报预览"
+        if header("藏品馆") and find_text(items, "分享藏品馆", exact=True):
+            return "藏品馆"
+        from .key import publication_date
+        if (header("永劫无间") and not find_text(items, "福利中心", exact=True)
+                and publication_date(items) is not None):
+            return "官方文章"
+        return None
+
+    def restore_task_route(self, mini, first=None):
+        """Return from verified Naraka task pages, without sending or retrying tasks."""
+        snap = first if first is not None else self.snapshot(mini, "task-route-recovery")
+        navigated = set()
+        for attempt in range(15):
+            self.guard()
+            route = self.known_task_route(snap)
+            if route is None and find_text(snap[2], self.config.welfare_label, exact=True):
+                return snap  # Caller must still verify platform, role and task state.
+            if route is None and not navigated:
+                raise StopAutomation("unrecognized", "任务恢复页面未知，未执行返回或重开操作")
+            if route is not None and route not in navigated:
+                frame = read_image(snap[1])
+                hit = match(frame[:max(110, frame.shape[0]//8), :max(80, frame.shape[1]//6)],
+                            "back", (.67, .8, 1, 1.2, 1.33), .90)
+                if not hit:
+                    raise StopAutomation("unrecognized", f"{route}没有可验证的返回箭头，未操作")
+                win.click_window_point(snap[0], *hit[1])
+                navigated.add(route)
+                self.event(f"从已验证的{route}返回一次，等待下一页面；未重复任务操作")
+            if attempt < 14:
+                time.sleep(.7)
+                snap = self.snapshot(mini, "task-route-recovery")
+        raise StopAutomation("entry_unavailable", "任务返回等待超时，保留页面，未重复返回或发送内容")
 
     def welfare(self, force_refresh=False):
         mini = self.open_mini()
@@ -303,6 +358,9 @@ class DesktopAdapter:
             if close:
                 win.click_window_point(snap[0], *close[1])
                 time.sleep(.6)
+                continue
+            if self.known_task_route(snap):
+                self.restore_task_route(mini, snap)
                 continue
             labels = find_text(snap[2], self.config.welfare_label, exact=True)
             if labels:
@@ -509,6 +567,22 @@ class DesktopAdapter:
                 self.record_task(task_id, "success", "操作后已复查页面：已完成")
             except PosterPageNotReady as exc:
                 self.record_task(task_id, "entry_unavailable", str(exc))
+                if self.window:
+                    try:
+                        page = self.snapshot(self.window, "poster-recovery-check")
+                        if self.known_task_route(page):
+                            self.restore_task_route(self.window, page)
+                            final = workflow.wrap(self.welfare())
+                            if workflow.task_button(final, config.task_labels[task_id]).text == "已完成":
+                                self.record_task(task_id, "success", "生成后延迟返回已恢复，福利页复查已完成；未再次生成或发送")
+                            continue
+                    except StopAutomation as recovery_error:
+                        if recovery_error.status in {"manual_required", "network_error", "interrupted", "desktop_busy"}:
+                            self.keep_windows = recovery_error.status == "manual_required"
+                            self.record_task(task_id, recovery_error.status, str(recovery_error))
+                            return Result(recovery_error.status, str(recovery_error), "desktop")
+                    except win.AutomationSafetyError:
+                        pass
                 return Result("partial", f"{TITLES[task_id]}：{exc}。后续任务未执行，避免在未知页面操作。", "desktop")
             except StopAutomation as exc:
                 self.keep_windows = exc.status == "manual_required"
