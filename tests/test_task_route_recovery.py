@@ -93,4 +93,3 @@ class TaskRouteRecoveryTests(unittest.TestCase):
             driver.complete_poster.assert_called_once()
             driver.complete_reading.assert_called_once()
             adapter.restore_task_route.assert_called_once()
-

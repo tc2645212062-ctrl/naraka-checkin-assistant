@@ -59,4 +59,3 @@ class MiniNavigationTests(unittest.TestCase):
         result, adapter = self.run_flow('challenge')
         self.assertEqual('manual_required', result.status)
         adapter.click.assert_not_called()
-

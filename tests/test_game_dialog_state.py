@@ -81,4 +81,3 @@ class SavedDialogTests(unittest.TestCase):
         result, calls = self.run_flow([['使用其他账号登录', '进入游戏']], reject=99, wrong_details=True)
         self.assertEqual('unrecognized', result.status)
         self.assertEqual(['observe', 'act:saved_account'], calls)
-

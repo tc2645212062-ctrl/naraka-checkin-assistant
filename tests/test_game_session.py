@@ -166,4 +166,3 @@ class FlowCleanupTests(unittest.TestCase):
         self.assertEqual('precondition', result.status)
         self.assertIn('残留', result.reason)
         session.cleanup.assert_called_once_with(close=True)
-

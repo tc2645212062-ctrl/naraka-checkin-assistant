@@ -58,4 +58,3 @@ class NativeOwnershipTests(unittest.TestCase):
         self.assertTrue(self.check(game=game, ancestors=[parent,root]))
         parent['parent'] = 999
         self.assertFalse(self.check(game=game, ancestors=[parent,root]))
-

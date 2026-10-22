@@ -51,4 +51,3 @@ class CleanupPipeTests(unittest.TestCase):
         _, report, errors = self.run_stop(failure=True)
         self.assertIsNone(report)
         self.assertTrue(errors)
-
