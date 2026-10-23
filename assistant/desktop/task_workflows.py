@@ -6,6 +6,7 @@ from .models import WindowInfo, OcrItem
 from .vision import find_text, nearest_to, combined_text
 from .windows import *
 from .key import extract_key_from_article_image, publication_date
+from .poster import gallery_share_button, data_update_pending
 KEY_SCAN_PAGES = 48
 
 @dataclass
@@ -17,11 +18,17 @@ class Snapshot:
 
 class PosterPageNotReady(AutomationSafetyError):
     """The poster route is unknown; do not attempt subsequent task routes."""
+    def __init__(self, message, status='entry_unavailable'):
+        super().__init__(message)
+        self.status=status
 
 class TaskWorkflows:
     def _wait_poster_page(self, mini, name, ready, reason, attempts=12):
         for attempt in range(attempts):
             page = self.snapshot(mini, name)
+            if self._poster_gallery_ready(page) and data_update_pending(page.items):
+                raise PosterPageNotReady('小程序提示藏品数据更新尚未生效，请稍后再试；未重复生成或发送海报',
+                                         status='precondition')
             if ready(page):
                 return page
             if attempt + 1 < attempts:
@@ -32,7 +39,7 @@ class TaskWorkflows:
     def _poster_gallery_ready(page):
         header = [item for item in find_text(page.items, "藏品馆", exact=True)
                   if item.center[1] < page.window.height * .15]
-        return len(header) == 1 and bool(find_text(page.items, "分享藏品馆"))
+        return len(header) == 1 and gallery_share_button(page.items) is not None
 
     def task_button(self, snapshot: Snapshot, task_text: str) -> OcrItem:
         tasks = find_text(snapshot.items, task_text)

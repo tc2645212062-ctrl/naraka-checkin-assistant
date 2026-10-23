@@ -361,7 +361,8 @@ class DesktopAdapter:
                         if item.center[1] < window.height * .15]) == 1
         if header("图片预览") and find_text(items, "转发给朋友", exact=True):
             return "海报预览"
-        if header("藏品馆") and find_text(items, "分享藏品馆", exact=True):
+        from .poster import gallery_share_button
+        if header("藏品馆") and gallery_share_button(items) is not None:
             return "藏品馆"
         from .key import publication_date
         if (header("永劫无间") and not find_text(items, "福利中心", exact=True)
@@ -634,7 +635,7 @@ class DesktopAdapter:
                     raise win.AutomationSafetyError("动作结束后任务未标记已完成")
                 self.record_task(task_id, "success", "操作后已复查页面：已完成")
             except PosterPageNotReady as exc:
-                self.record_task(task_id, "entry_unavailable", str(exc))
+                self.record_task(task_id, exc.status, str(exc))
                 if self.window:
                     try:
                         page = self.snapshot(self.window, "poster-recovery-check")
