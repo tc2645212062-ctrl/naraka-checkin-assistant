@@ -32,6 +32,8 @@ def classify_page(kind: str, lines: list[str]) -> GameState:
     if kind == 'launcher':
         if '内存' in text and '继续启动' in text and ('当前可用' in text or '清理' in text):
             return GameState('precondition', '官方启动器提示可用内存不足；未确认继续启动，等待内存释放后再试')
+        if any(token in text for token in ('正在更新', '正在检查更新', '正在下载更新')):
+            return GameState('updating', '官方启动器正在更新，限定等待完成；未发送启动或安装确认')
         if '启动游戏' in text:
             return GameState('advance', '官方启动器已就绪', 'launcher_start')
         return GameState('waiting', '等待启动器检查或更新；不自动确认安装提示')
@@ -366,12 +368,15 @@ def _drive_game_login(evidence: Path, event, cancel, client_factory, read_page, 
     control_rejections = {}
     transition_until = {}
     transition_logged = set()
+    last_status = ''
     try:
         with client_factory(cancel) as broker:
             for step in range(80):
                 if cancel and cancel.is_set():
                     return GameState('interrupted', '用户停止了游戏登录')
                 if time.monotonic() >= deadline:
+                    if last_status == 'updating':
+                        return GameState('precondition', '官方启动器更新尚未完成；已达到本次等待上限，尚未启动游戏')
                     return GameState('precondition', '等待游戏登录超时，下次计划再检查')
                 try:
                     focus_attempts = 45 if time.monotonic() < loading_until else 4
@@ -424,6 +429,7 @@ def _drive_game_login(evidence: Path, event, cancel, client_factory, read_page, 
                 image = evidence / f'game-{step:02d}.png'
                 image.write_bytes(base64.b64decode(observed['png'], validate=True))
                 state = classify_page(observed['kind'], read_page(image))
+                last_status = state.status
                 event('游戏登录：' + state.reason)
                 if state.status == 'ready' and close_started_game and (launcher_requested or counts.get('launcher_start')):
                     event('已确认游戏大厅，退出本轮启动的游戏后再领取小程序积分')
@@ -515,7 +521,8 @@ def _drive_game_login(evidence: Path, event, cancel, client_factory, read_page, 
                         return GameState('interrupted', '用户停止了游戏登录')
                 else:
                     time.sleep(delay)
-        return GameState('precondition', '游戏页面未能在限定时间内进入大厅')
+        return GameState('precondition', '官方启动器更新尚未完成；已达到本次观察上限，尚未启动游戏'
+                         if last_status == 'updating' else '游戏页面未能在限定时间内进入大厅')
     except GameLoginError as exc:
         return GameState(exc.status, str(exc))
     except Exception as exc:
