@@ -43,6 +43,13 @@ class WindowSession:
     def same_window(left, right):
         return (left.pid, left.class_name, left.title) == (right.pid, right.class_name, right.title)
 
+    @staticmethod
+    def is_client(window):
+        return window.title == '微信' and (
+            window.class_name.endswith('QWindowIcon')
+            or window.class_name == 'WeChatMainWndForPC'
+            or 'LoginWindow' in window.class_name)
+
     def minimize_started_games(self):
         """Release foreground after a verified lobby, before returning to WeChat."""
         if not win.desktop_available():
@@ -70,11 +77,19 @@ class WindowSession:
             try:
                 before = self.initial.get(handle)
                 if before and self.same_window(before, actual):
-                    if before.visible:
+                    if before.minimized:
                         win.win32gui.ShowWindow(handle, win.win32con.SW_MINIMIZE)
-                    else:
+                    elif not before.visible:
                         win.hide_window(actual)
-                    self.event('已收起本轮使用的微信窗口')
+                    elif actual.minimized or not actual.visible:
+                        win.win32gui.ShowWindow(handle, win.win32con.SW_SHOWNOACTIVATE)
+                    self.event('已恢复原微信窗口显示状态，保留原会话')
+                elif self.is_client(actual):
+                    # Login can replace its HWND with the main client HWND.
+                    # WM_CLOSE on that new window can exit the whole client.
+                    if 'LoginWindow' not in actual.class_name:
+                        win.win32gui.ShowWindow(handle, win.win32con.SW_MINIMIZE)
+                    self.event('保留本轮出现的微信主窗口及登录会话，未关闭客户端')
                 else:
                     win.close_window(actual)
                     self.event('已关闭本轮新开的微信任务窗口')

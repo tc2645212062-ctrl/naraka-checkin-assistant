@@ -65,6 +65,10 @@ class ForegroundUnavailable(AutomationSafetyError):
     """The interactive desktop cannot currently give the target focus."""
 
 
+class MainWindowAmbiguous(AutomationSafetyError):
+    """Existing clients cannot be selected safely; never fall back to login."""
+
+
 def enable_dpi_awareness() -> None:
     """Use physical pixels so screenshots and input coordinates agree."""
     try:
@@ -148,7 +152,8 @@ def choose_main_window(windows: Iterable[WindowInfo]) -> WindowInfo:
     # QWindowIcon class in the current client (or WeChatMainWndForPC in older
     # versions); article readers and mini-program hosts use Chrome classes.
     def is_desktop_client(window: WindowInfo) -> bool:
-        return window.class_name.endswith("QWindowIcon") or window.class_name == "WeChatMainWndForPC"
+        return 'LoginWindow' not in window.class_name and (
+            window.class_name.endswith("QWindowIcon") or window.class_name == "WeChatMainWndForPC")
 
     desktop_windows = [window for window in windows if is_desktop_client(window)]
     candidates = [
@@ -176,24 +181,44 @@ def choose_main_window(windows: Iterable[WindowInfo]) -> WindowInfo:
 
     ranked = sorted(candidates, key=score, reverse=True)
     if len(ranked) > 1 and score(ranked[0]) == score(ranked[1]):
-        raise AutomationSafetyError(
+        raise MainWindowAmbiguous(
             "Multiple equally likely WeChat main windows were found; refusing ambiguous input."
         )
     return ranked[0]
+
+
+def start_wechat_if_absent(executable) -> bool:
+    """Cold start only after both process and notification-area checks."""
+    if wechat_processes():
+        return False
+    if not desktop_available():
+        raise AutomationSafetyError('桌面不可交互，未启动微信')
+    from .tray import wechat_tray_present
+    try:
+        if wechat_tray_present():
+            return False
+    except Exception as exc:
+        raise AutomationSafetyError('无法核对微信托盘状态，未启动其他实例：' + str(exc)) from exc
+    # Another client may have appeared while the tray was being inspected.
+    if wechat_processes():
+        return False
+    executable = Path(executable)
+    if not executable.is_file():
+        raise AutomationSafetyError(f'微信程序不可用：{executable}')
+    subprocess.Popen([str(executable)], cwd=str(executable.parent))
+    return True
 
 
 def ensure_wechat_main_window(timeout: float = 40.0) -> tuple[WindowInfo, bool]:
     """Reuse a running WeChat; launch only when *no* Weixin.exe exists."""
     if wechat_processes():
         return choose_main_window(enumerate_wechat_windows()), False
-    if not WECHAT_EXECUTABLE.is_file():
-        raise AutomationSafetyError(f"WeChat executable is unavailable: {WECHAT_EXECUTABLE}")
-    subprocess.Popen([str(WECHAT_EXECUTABLE)], cwd=str(WECHAT_EXECUTABLE.parent))
+    started = start_wechat_if_absent(WECHAT_EXECUTABLE)
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if wechat_processes():
             try:
-                return choose_main_window(enumerate_wechat_windows()), True
+                return choose_main_window(enumerate_wechat_windows()), started
             except AutomationSafetyError:
                 pass
         time.sleep(0.5)

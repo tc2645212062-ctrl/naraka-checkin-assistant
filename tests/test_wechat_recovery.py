@@ -1,38 +1,34 @@
+import json
 import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
-from assistant.desktop.recovery import restart_main
+from assistant.desktop.recovery import restore_main
+
 
 class RecoveryTests(unittest.TestCase):
-    def test_once_per_day_and_only_matching_main_process(self):
-        with tempfile.TemporaryDirectory() as folder:
-            exe=Path(folder)/'Weixin.exe';exe.touch(); marker=Path(folder)/'state.json'
-            window=SimpleNamespace(title='微信',class_name='Qt51514QWindowIcon',pid=42)
-            process=Mock();process.exe.return_value=str(exe)
-            with patch('assistant.desktop.recovery.psutil.Process',return_value=process), patch('assistant.desktop.recovery.subprocess.Popen') as start:
-                restart_main(window,str(exe),marker,'2026-09-26')
-                with self.assertRaisesRegex(RuntimeError,'今天已恢复'):restart_main(window,str(exe),marker,'2026-09-26')
-                process.terminate.assert_called_once();process.wait.assert_called_once_with(timeout=10);start.assert_called_once()
-                restart_main(window,str(exe),marker,'2026-09-27')
-                self.assertEqual(2,start.call_count)
-
-    def test_wrong_executable_never_terminated(self):
+    def run_case(self, mode):
         with tempfile.TemporaryDirectory() as folder:
             exe=Path(folder)/'Weixin.exe';exe.touch();marker=Path(folder)/'state.json'
-            process=Mock();process.exe.return_value=str(Path(folder)/'other.exe')
             window=SimpleNamespace(title='微信',class_name='Qt51514QWindowIcon',pid=42)
-            with patch('assistant.desktop.recovery.psutil.Process',return_value=process):
-                with self.assertRaises(RuntimeError):restart_main(window,str(exe),marker,'2026-09-26')
-            process.terminate.assert_not_called();self.assertFalse(marker.exists())
+            process=Mock();process.exe.return_value=str(exe if mode!='wrong_path' else exe.parent/'other.exe')
+            with patch('assistant.desktop.recovery.psutil.Process',return_value=process), \
+                 patch('assistant.desktop.recovery.win.restore_existing_wechat',return_value=window) as restore:
+                if mode=='wrong_path':
+                    with self.assertRaises(RuntimeError):restore_main(window,str(exe),marker,'2026-10-23')
+                    restore.assert_not_called();self.assertFalse(marker.exists())
+                else:
+                    if mode=='failure':restore.side_effect=RuntimeError('focus denied')
+                    if mode=='failure':
+                        with self.assertRaisesRegex(RuntimeError,'focus denied'):restore_main(window,str(exe),marker,'2026-10-23')
+                    else:
+                        self.assertIs(window,restore_main(window,str(exe),marker,'2026-10-23'))
+                    with self.assertRaisesRegex(RuntimeError,'今天已恢复'):restore_main(window,str(exe),marker,'2026-10-23')
+                    restore.assert_called_once_with(window)
+                    self.assertEqual('restore_only',json.loads(marker.read_text(encoding='utf-8'))['mode'])
+                process.terminate.assert_not_called();process.wait.assert_not_called()
 
-    def test_failed_termination_also_consumes_daily_budget(self):
-        with tempfile.TemporaryDirectory() as folder:
-            exe=Path(folder)/'Weixin.exe';exe.touch();marker=Path(folder)/'state.json'
-            process=Mock();process.exe.return_value=str(exe);process.terminate.side_effect=RuntimeError('access denied')
-            window=SimpleNamespace(title='微信',class_name='Qt51514QWindowIcon',pid=42)
-            with patch('assistant.desktop.recovery.psutil.Process',return_value=process),patch('assistant.desktop.recovery.subprocess.Popen') as start:
-                with self.assertRaisesRegex(RuntimeError,'access denied'):restart_main(window,str(exe),marker,'2026-09-26')
-                with self.assertRaisesRegex(RuntimeError,'今天已恢复'):restart_main(window,str(exe),marker,'2026-09-26')
-                start.assert_not_called();process.terminate.assert_called_once()
+    def test_restores_once_without_exiting_existing_process(self):self.run_case('ok')
+    def test_wrong_executable_never_restored_or_terminated(self):self.run_case('wrong_path')
+    def test_failed_restore_also_consumes_daily_budget(self):self.run_case('failure')

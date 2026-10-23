@@ -5,6 +5,26 @@ import win32gui
 from pywinauto import Desktop
 
 
+def wechat_tray_present():
+    """Read-only presence check; pinned taskbar launch buttons do not count."""
+    desktop = Desktop(backend='uia')
+    handle = win32gui.FindWindow('Shell_TrayWnd', None)
+    if not handle:
+        raise RuntimeError('未找到 Windows 任务栏，无法确认微信未运行')
+    tray = desktop.window(handle=handle).wrapper_object()
+    if any(x.window_text() in {'微信', 'WeChat', 'Weixin'}
+           and x.parent().class_name() == 'ToolbarWindow32'
+           for x in tray.descendants(control_type='Button')):
+        return True
+    overflow = win32gui.FindWindow('NotifyIconOverflowWindow', None)
+    if overflow:
+        panel = desktop.window(handle=overflow).wrapper_object()
+        if any(x.window_text() in {'微信', 'WeChat', 'Weixin'}
+               for x in panel.descendants(control_type='Button')):
+            return True
+    return False
+
+
 def activate_wechat_tray():
     desktop = Desktop(backend="uia")
     tray_handle = win32gui.FindWindow("Shell_TrayWnd", None)

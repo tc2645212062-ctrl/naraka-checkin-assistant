@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import os
 import time
 from pathlib import Path
 
@@ -37,6 +36,8 @@ class DesktopAdapter:
         self.window_session = None
         self.keep_windows = False
         self.verified_articles = set()
+        self.mini_launch_window = None
+        self.login_observations = []
 
     def guard(self):
         if self.cancel and self.cancel.is_set():
@@ -107,39 +108,125 @@ class DesktopAdapter:
             if mini:
                 return mini
             time.sleep(.5)
+        self.guard()
+        mini = self.existing_mini()
+        if mini:
+            return mini
+        record = {'at': now().isoformat(), 'status': 'timeout',
+                  'target': self.config.mini_title,
+                  'windows': [w.as_dict() for w in win.enumerate_wechat_windows()]}
+        try:
+            if self.mini_launch_window is not None:
+                snap = self.snapshot(self.mini_launch_window, 'mini-open-timeout')
+                record['page_image'] = snap[1].name
+            mini = self.existing_mini()
+            if mini:
+                record['status'] = 'ready_after_observation'
+                return mini
+        except StopAutomation as exc:
+            record.update(status=exc.status, reason=str(exc))
+            raise
+        except (ValueError, win.AutomationSafetyError, OSError) as exc:
+            record['observation_error'] = type(exc).__name__ + ': ' + str(exc)
+        finally:
+            self.save_diagnostic('mini-launch.json', record)
         raise StopAutomation("entry_unavailable", "小程序窗口未出现，请检查名称或快捷方式")
 
+    def save_diagnostic(self, name, record):
+        try:
+            (self.evidence/name).write_text(json.dumps(record, ensure_ascii=False, indent=2), encoding='utf-8')
+        except OSError as exc:
+            self.event('诊断记录保存失败，保留原执行状态：' + str(exc))
+
+    def record_login_state(self, window, labels, buttons, challenge, clicked):
+        self.login_observations.append({
+            'at': now().isoformat(), 'window': window.as_dict(),
+            'saved_entry_count': sum(b.window_text() == '进入微信' for b in buttons),
+            'qr_control_visible': any(b.window_text() == '二维码' for b in buttons),
+            'challenge': challenge, 'saved_entry_already_clicked': clicked,
+            'challenge_labels': [text for text in labels if any(token in text for token in
+                ('扫码', '二维码', '手机', '验证码', '安全验证', '人机验证', '滑块验证'))],
+        })
+        self.save_diagnostic('wechat-login.json', {'observations': self.login_observations})
+
     def ensure_main(self):
-        import subprocess
         from pywinauto import Desktop
-        if not win.wechat_processes():
-            if not self.config.wechat_exe or not Path(self.config.wechat_exe).is_file():
-                raise StopAutomation("entry_unavailable", "未找到微信；请在设置中选择 Weixin.exe")
-            subprocess.Popen([self.config.wechat_exe], cwd=str(Path(self.config.wechat_exe).parent))
+        from .tray import activate_wechat_tray, wechat_tray_present
+        try:
+            win.start_wechat_if_absent(self.config.wechat_exe)
+        except win.AutomationSafetyError as exc:
+            raise StopAutomation('entry_unavailable', str(exc)) from exc
         login_clicked = False
         login_loading_logged = False
         update_deferred = False
+        tray_attempted = False
+        tray_required = False
         for _ in range(30):
             self.guard()
             candidates = [w for w in Desktop(backend="uia").windows()
                           if "LoginWindow" in w.class_name() and w.window_text() == "微信"]
             owned = {w.handle: w for w in win.enumerate_wechat_windows() if w.visible}
             logins = [w for w in candidates if w.handle in owned]
+            # A second login window must never override an existing client.
+            # Restore the original main window (including its tray path) first.
+            try:
+                main = win.choose_main_window(win.enumerate_wechat_windows())
+            except win.MainWindowAmbiguous as exc:
+                raise StopAutomation('unrecognized', str(exc)) from exc
+            except win.AutomationSafetyError:
+                main = None
+            if main is not None:
+                try:
+                    main = win.restore_existing_wechat(main)
+                except win.ForegroundUnavailable as exc:
+                    raise StopAutomation('desktop_busy', str(exc)) from exc
+                except win.AutomationSafetyError as exc:
+                    raise StopAutomation('entry_unavailable', '原微信恢复失败，未启动登录器：' + str(exc)) from exc
+                snap = self.snapshot(main, 'wechat-start-page')
+                from .update_prompt import defer_update_button
+                later = defer_update_button(snap[2], main.width, main.height)
+                if later:
+                    if update_deferred:
+                        raise StopAutomation('entry_unavailable', '微信更新提示未关闭，停止重复操作')
+                    self.click(snap, later)
+                    self.event('已选择微信更新提示的稍后处理，未安装更新')
+                    update_deferred = True
+                    continue
+                return main
+            if tray_required:
+                raise StopAutomation('entry_unavailable', '微信托盘恢复后仍未找到原主窗口，未操作另一个登录器或启动其他实例')
+            if not tray_attempted:
+                tray_attempted = True
+                try:
+                    if wechat_tray_present():
+                        tray_required = True
+                        self.guard()
+                        activate_wechat_tray()
+                        self.event('仅通过托盘恢复现有微信，未启动登录器')
+                        time.sleep(.5)
+                        continue
+                except (RuntimeError, win.AutomationSafetyError) as exc:
+                    raise StopAutomation('entry_unavailable', '微信托盘恢复失败，未启动其他实例：' + str(exc)) from exc
             if len(logins) > 1:
                 raise StopAutomation("unrecognized", "发现多个微信登录窗口，停止选择")
             if logins:
                 # Empty UIA children can mean the login page is still loading.
                 # Require an explicit challenge before requesting manual login.
                 labels = ["".join(c.window_text().split())
-                          for c in logins[0].descendants(control_type="Text")]
+                          for c in logins[0].descendants(control_type="Text") if c.is_visible()]
+                visible_buttons = [c for c in logins[0].descendants(control_type='Button') if c.is_visible()]
+                qr_visible = any(c.window_text() == '二维码' for c in visible_buttons)
                 challenge = next((token for token in (
                     "扫码登录", "扫描二维码", "手机上确认", "手机微信上确认",
                     "手机确认登录", "手机微信确认", "验证码", "安全验证",
                     "人机验证", "滑块验证",
-                ) if any(token in label for label in labels)), None)
+                ) if any(token in label and (token != '扫码登录' or qr_visible
+                          or any(word in label for word in ('请', '使用', '手机', '微信')))
+                          for label in labels)), None)
+                self.record_login_state(owned[logins[0].handle], labels, visible_buttons, challenge, login_clicked)
                 if challenge:
                     raise StopAutomation("manual_required", f"微信登录页面要求：{challenge}，已停止自动操作")
-                buttons = [c for c in logins[0].descendants(control_type="Button") if c.window_text() == "进入微信"]
+                buttons = [c for c in visible_buttons if c.window_text() == "进入微信"]
                 if len(buttons) > 1:
                     raise StopAutomation("unrecognized", "未唯一识别微信已保存账号的进入按钮")
                 if buttons and not login_clicked:
@@ -157,38 +244,19 @@ class DesktopAdapter:
                     login_loading_logged = True
                 time.sleep(.5)
                 continue
-            try:
-                main = win.choose_main_window(win.enumerate_wechat_windows())
-                try:
-                    main = win.restore_existing_wechat(main)
-                except win.ForegroundUnavailable as exc:
-                    raise StopAutomation("desktop_busy", str(exc)) from exc
-                snap = self.snapshot(main, "wechat-start-page")
-                from .update_prompt import defer_update_button
-                later = defer_update_button(snap[2], main.width, main.height)
-                if later:
-                    if update_deferred:
-                        raise StopAutomation("entry_unavailable", "微信更新提示未关闭，停止重复操作")
-                    self.click(snap, later)
-                    self.event("已选择微信更新提示的稍后处理，未安装更新")
-                    update_deferred = True
-                    continue
-                return main
-            except win.AutomationSafetyError:
-                time.sleep(.5)
+            time.sleep(.5)
         raise StopAutomation("precondition", "微信登录或主窗口加载超时，未确认需要扫码或手机验证；请稍后复查")
 
     def recover_wechat(self, main):
-        from .recovery import restart_main
+        from .recovery import restore_main
         from ..config import data_directory
         self.guard()
         try:
-            restart_main(main, self.config.wechat_exe,
+            restored = restore_main(main, self.config.wechat_exe,
                          data_directory()/"wechat-recovery.json", self.day, self.event)
         except Exception as exc:
             raise StopAutomation("entry_unavailable", str(exc)) from exc
-        time.sleep(3)
-        return self.ensure_main()
+        return restored
 
     def mini_list_snapshot(self, main):
         # WeChat versions can host the list in a separate Chrome window.
@@ -211,10 +279,9 @@ class DesktopAdapter:
             return mini
         main = self.ensure_main()
         if self.config.shortcut:
-            if not Path(self.config.shortcut).is_file():
-                raise StopAutomation("entry_unavailable", "配置的小程序快捷方式已不存在")
-            os.startfile(self.config.shortcut)
-            return self.wait_mini()
+            # A .lnk can invoke Weixin.exe again. Keep the saved setting but
+            # navigate the verified running client instead of starting it.
+            self.event('复用原微信内的小程序入口，未调用可能启动登录器的快捷方式')
         snap = self.mini_list_snapshot(main)
         def listed(page):
             return mini_list_ready(page[2])
@@ -268,6 +335,7 @@ class DesktopAdapter:
             raise StopAutomation("entry_unavailable", str(exc)) from exc
         if entry is None:
             raise StopAutomation("entry_unavailable", "可见的最近使用/我的常用分区中没有唯一目标小程序；首次请在微信打开一次或配置快捷方式")
+        self.mini_launch_window = snap[0]
         self.click(snap, entry)
         return self.wait_mini()
 

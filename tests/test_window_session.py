@@ -13,7 +13,7 @@ def window(handle, pid=10, title='微信'):
 
 class WindowSessionTests(unittest.TestCase):
     def test_closes_new_minimizes_reused_leaves_untouched(self):
-        existing,new,untouched=window(1),window(2,title='永劫无间'),window(3)
+        existing,new,untouched=WindowInfo(1,10,'微信','Qt',True,True,(0,0,1000,800)),window(2,title='永劫无间'),window(3)
         with patch('assistant.desktop.session.win.enumerate_wechat_windows',side_effect=[[existing,untouched],[existing,new,untouched]]), patch.object(WindowSession,'game_windows',return_value=[]), patch('assistant.desktop.session.win.desktop_available',return_value=True), patch('assistant.desktop.session.win.close_window') as close, patch('assistant.desktop.session.win.win32gui.ShowWindow') as show:
             session=WindowSession();session.remember(existing);session.remember(new);session.finish()
             close.assert_called_once_with(new)
