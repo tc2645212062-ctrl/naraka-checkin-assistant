@@ -63,6 +63,9 @@ class AutomationSafetyError(RuntimeError):
 
 class ForegroundUnavailable(AutomationSafetyError):
     """The interactive desktop cannot currently give the target focus."""
+    def __init__(self, message, details=None):
+        super().__init__(message)
+        self.details=details or {}
 
 
 class MainWindowAmbiguous(AutomationSafetyError):
@@ -366,8 +369,19 @@ def target_or_owned_popup(handle: int, window: WindowInfo) -> bool:
 
 
 def assert_target_foreground(window: WindowInfo) -> None:
-    if not target_or_owned_popup(win32gui.GetForegroundWindow(), window):
-        raise AutomationSafetyError("WeChat lost foreground focus; refusing input.")
+    foreground=win32gui.GetForegroundWindow()
+    if not target_or_owned_popup(foreground, window):
+        details={'input_sent':False,'expected':{'handle':window.handle,'pid':window.pid},
+                 'foreground':{'handle':foreground},'user_idle_seconds':None}
+        try:
+            pid=win32process.GetWindowThreadProcessId(foreground)[1]
+            process=psutil.Process(pid)
+            details['foreground'].update(pid=pid,process_name=process.name(),exe=process.exe())
+        except (psutil.Error,win32gui.error,OSError):
+            details['foreground']['identity_unreadable']=True
+        try:details['user_idle_seconds']=idle_seconds()
+        except (AutomationSafetyError,OSError):pass
+        raise ForegroundUnavailable("WeChat lost foreground focus; refusing input.",details)
 
 
 def click_window_point(window: WindowInfo, x: int, y: int) -> None:

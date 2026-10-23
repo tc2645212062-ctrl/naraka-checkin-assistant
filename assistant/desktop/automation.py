@@ -53,9 +53,10 @@ class DesktopAdapter:
             self.window_session.remember(window)
         try:
             window = win.focus_window(window)
+            win.assert_target_foreground(window)
         except win.ForegroundUnavailable as exc:
+            self.save_diagnostic('foreground-busy.json',exc.details)
             raise StopAutomation("desktop_busy", str(exc)) from exc
-        win.assert_target_foreground(window)
         self.step += 1
         path = self.evidence / f"{self.step:02d}-{name}.png"
         win.capture_window(window, path)
@@ -541,6 +542,9 @@ class DesktopAdapter:
         except StopAutomation as exc:
             self.keep_windows = exc.status == "manual_required"
             return Result(exc.status, str(exc), "desktop")
+        except win.ForegroundUnavailable as exc:
+            self.save_diagnostic('foreground-busy.json',exc.details)
+            return Result('desktop_busy',str(exc),'desktop')
         except (ValueError, win.AutomationSafetyError) as exc:
             return Result("unrecognized", str(exc), "desktop")
 
@@ -653,10 +657,14 @@ class DesktopAdapter:
                     except win.AutomationSafetyError:
                         pass
                 return Result("partial", f"{TITLES[task_id]}：{exc}。后续任务未执行，避免在未知页面操作。", "desktop")
+            except win.ForegroundUnavailable as exc:
+                self.save_diagnostic('foreground-busy.json',exc.details)
+                self.record_task(task_id,'desktop_busy',str(exc))
+                return Result('desktop_busy',str(exc),'desktop')
             except StopAutomation as exc:
                 self.keep_windows = exc.status == "manual_required"
                 self.record_task(task_id, exc.status, str(exc))
-                if exc.status in {"manual_required", "network_error", "interrupted"}:
+                if exc.status in {"manual_required", "network_error", "interrupted", "desktop_busy"}:
                     return Result(exc.status, f"{TITLES[task_id]}：{exc}。其他任务结果见日志。", "desktop")
             except Exception as exc:
                 self.record_task(task_id, "unrecognized", str(exc))

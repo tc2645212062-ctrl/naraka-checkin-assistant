@@ -240,8 +240,10 @@ class BrokerClient:
             # Observation may ask the already-authorized broker to perform its
             # own focus check. Keep the pipe alive during a slow cold launch;
             # actions and unavailable desktops still stop immediately.
-            if not (command == 'observe' and exc.status == 'desktop_busy'
-                    and '未能切到前台' in str(exc)):
+            normal_restore_pending = (exc.status == 'precondition' and str(exc)
+                == '游戏/启动器窗口未恢复到可截图尺寸；未发送游戏操作')
+            if not (command == 'observe' and (normal_restore_pending
+                    or (exc.status == 'desktop_busy' and '未能切到前台' in str(exc)))):
                 raise
         if command == 'act:launcher_start' and self.game_session:
             self.game_session.expect_game()
